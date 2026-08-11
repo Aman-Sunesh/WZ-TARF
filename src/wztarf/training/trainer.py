@@ -117,7 +117,7 @@ class Trainer:
         road_gt_tolerance_m: float = 0.25,
         grad_clip_norm: float | None = 5.0,
         use_amp: bool = True,
-        amp_dtype: torch.dtype = torch.float16,
+        amp_dtype: torch.dtype = torch.bfloat16,
         scheduler_metric: str | None = None,
     ) -> None:
         """Create a supervised trainer.
