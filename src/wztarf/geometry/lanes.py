@@ -80,44 +80,19 @@ def reconstruct_lane_polygons(
         if not bool(lane_mask[lane_index]):
             continue
 
-        valid = lane_point_mask[lane_index].bool()
-
-        if int(valid.sum().item()) < 2:
-            continue
-
-        lane = lane_feat[
-            lane_index,
-            valid,
-        ]
-
-        center = lane[:, 0:2]
-        left_offset = lane[:, 4:6]
-        right_offset = lane[:, 6:8]
-
-        left = (
-            center
-            +
-            left_offset
+        polygon = reconstruct_lane_polygon(
+            lane_feat[
+                lane_index
+            ],
+            lane_point_mask[
+                lane_index
+            ],
         )
 
-        right = (
-            center
-            +
-            right_offset
-        )
-
-        polygon = torch.cat(
-            (
-                left,
-                torch.flip(
-                    right,
-                    dims=(0,),
-                ),
-            ),
-            dim=0,
-        )
-
-        polygons.append(polygon)
+        if polygon is not None:
+            polygons.append(
+                polygon
+            )
 
     return polygons
 
