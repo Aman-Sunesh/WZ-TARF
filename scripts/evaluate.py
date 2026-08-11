@@ -319,27 +319,28 @@ def main() -> None:
         ),
     )
 
-    reset_peak_gpu_memory(
-        device
-        if device.type == "cuda"
-        else None
-    )
-
-    with torch.inference_mode():
-        model(
-            latency_batch
+    if device.type == "cuda":
+        reset_peak_gpu_memory(
+            device
         )
 
-    if device.type == "cuda":
+        with torch.inference_mode():
+            model(
+                latency_batch
+            )
+
         torch.cuda.synchronize(
             device
         )
 
-    memory_mb = peak_gpu_memory_mb(
-        device
-        if device.type == "cuda"
-        else None
-    )
+        memory_mb = peak_gpu_memory_mb(
+            device
+        )
+
+    else:
+        memory_mb = float(
+            "nan"
+        )
 
     efficiency = {
         **latency,
