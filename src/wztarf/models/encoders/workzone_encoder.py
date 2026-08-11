@@ -5,9 +5,607 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from wztarf.geometry.workzone import points_in_polygon
+from wztarf.geometry.workzone import (
+    distance_to_polygon,
+    points_in_polygon,
+)
+
+def _lane_segment_geometry(
+    lane_feat: torch.Tensor | None,
+    lane_point_mask: torch.Tensor | None,
+    lane_mask: torch.Tensor | None,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+] | None:
+    """Build lane-center segments and represented corridor half-widths."""
+    values = (
+        lane_feat,
+        lane_point_mask,
+        lane_mask,
+    )
+
+    if all(
+        value is None
+        for value in values
+    ):
+        return None
+
+    if any(
+        value is None
+        for value in values
+    ):
+        raise ValueError(
+            "lane_feat, lane_point_mask, and lane_mask "
+            "must be supplied together."
+        )
+
+    assert lane_feat is not None
+    assert lane_point_mask is not None
+    assert lane_mask is not None
+
+    if lane_feat.ndim != 4 or lane_feat.shape[-1] < 8:
+        raise ValueError(
+            "lane_feat must have shape [B, L, P, F] with F >= 8."
+        )
+
+    if lane_point_mask.shape != lane_feat.shape[:3]:
+        raise ValueError(
+            "lane_point_mask must have shape [B, L, P]."
+        )
+
+    if lane_mask.shape != lane_feat.shape[:2]:
+        raise ValueError(
+            "lane_mask must have shape [B, L]."
+        )
+
+    center = lane_feat[
+        ...,
+        0:2,
+    ]
+
+    valid_point = (
+        lane_point_mask.bool()
+        &
+        lane_mask.bool()[
+            :,
+            :,
+            None,
+        ]
+    )
+
+    segment_start = center[
+        :,
+        :,
+        :-1,
+    ]
+
+    segment_end = center[
+        :,
+        :,
+        1:,
+    ]
+
+    segment_valid = (
+        valid_point[
+            :,
+            :,
+            :-1,
+        ]
+        &
+        valid_point[
+            :,
+            :,
+            1:,
+        ]
+    )
+
+    left_width = torch.linalg.vector_norm(
+        lane_feat[
+            ...,
+            4:6,
+        ],
+        dim=-1,
+    )
+
+    right_width = torch.linalg.vector_norm(
+        lane_feat[
+            ...,
+            6:8,
+        ],
+        dim=-1,
+    )
+
+    point_half_width = 0.5 * (
+        left_width
+        +
+        right_width
+    )
+
+    segment_half_width = 0.5 * (
+        point_half_width[
+            :,
+            :,
+            :-1,
+        ]
+        +
+        point_half_width[
+            :,
+            :,
+            1:,
+        ]
+    )
+
+    return (
+        segment_start,
+        segment_end,
+        segment_half_width,
+        segment_valid,
+    )
 
 
+def _point_segment_distance(
+    point: torch.Tensor,
+    start: torch.Tensor,
+    end: torch.Tensor,
+) -> torch.Tensor:
+    """Return Euclidean point-to-segment distance with broadcasting."""
+    segment = (
+        end
+        -
+        start
+    )
+
+    length_sq = (
+        segment.square()
+        .sum(
+            dim=-1
+        )
+        .clamp_min(
+            1e-8
+        )
+    )
+
+    alpha = (
+        (
+            point
+            -
+            start
+        )
+        *
+        segment
+    ).sum(
+        dim=-1
+    ) / length_sq
+
+    alpha = alpha.clamp(
+        0.0,
+        1.0,
+    )
+
+    closest = (
+        start
+        +
+        alpha[
+            ...,
+            None,
+        ]
+        *
+        segment
+    )
+
+    return torch.linalg.vector_norm(
+        point
+        -
+        closest,
+        dim=-1,
+    )
+
+
+def _points_to_lane_distance(
+    points: torch.Tensor,
+    lane_geometry: tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ] | None,
+) -> torch.Tensor:
+    """Return distance from query points to the represented lane corridor."""
+    if lane_geometry is None:
+        return torch.zeros(
+            points.shape[:2],
+            dtype=points.dtype,
+            device=points.device,
+        )
+
+    (
+        lane_start,
+        lane_end,
+        lane_half_width,
+        lane_valid,
+    ) = lane_geometry
+
+    query = points[
+        :,
+        :,
+        None,
+        None,
+        :,
+    ]
+
+    start = lane_start[
+        :,
+        None,
+    ]
+
+    end = lane_end[
+        :,
+        None,
+    ]
+
+    distance = _point_segment_distance(
+        query,
+        start,
+        end,
+    )
+
+    distance = (
+        distance
+        -
+        lane_half_width[
+            :,
+            None,
+        ]
+    ).clamp_min(
+        0.0
+    )
+
+    distance = distance.masked_fill(
+        ~lane_valid[
+            :,
+            None,
+        ],
+        torch.finfo(
+            distance.dtype
+        ).max,
+    )
+
+    minimum = distance.flatten(
+        start_dim=2
+    ).min(
+        dim=-1
+    ).values
+
+    has_lane = lane_valid.flatten(
+        start_dim=1
+    ).any(
+        dim=1
+    )
+
+    return torch.where(
+        has_lane[
+            :,
+            None,
+        ],
+        minimum,
+        torch.zeros_like(
+            minimum
+        ),
+    )
+
+
+def _cross_2d(
+    first: torch.Tensor,
+    second: torch.Tensor,
+) -> torch.Tensor:
+    """Return the scalar 2-D cross product with broadcasting."""
+    return (
+        first[..., 0]
+        *
+        second[..., 1]
+        -
+        first[..., 1]
+        *
+        second[..., 0]
+    )
+
+
+def _segments_to_lane_distance(
+    query_start: torch.Tensor,
+    query_end: torch.Tensor,
+    lane_geometry: tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ] | None,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+]:
+    """Return lane-corridor distance and overlap for query segments."""
+    if lane_geometry is None:
+        shape = query_start.shape[:2]
+
+        return (
+            torch.zeros(
+                shape,
+                dtype=query_start.dtype,
+                device=query_start.device,
+            ),
+            torch.zeros(
+                shape,
+                dtype=torch.bool,
+                device=query_start.device,
+            ),
+        )
+
+    (
+        lane_start,
+        lane_end,
+        lane_half_width,
+        lane_valid,
+    ) = lane_geometry
+
+    qa = query_start[
+        :,
+        :,
+        None,
+        None,
+        :,
+    ]
+
+    qb = query_end[
+        :,
+        :,
+        None,
+        None,
+        :,
+    ]
+
+    la = lane_start[
+        :,
+        None,
+    ]
+
+    lb = lane_end[
+        :,
+        None,
+    ]
+
+    endpoint_distance = torch.stack(
+        (
+            _point_segment_distance(
+                qa,
+                la,
+                lb,
+            ),
+            _point_segment_distance(
+                qb,
+                la,
+                lb,
+            ),
+            _point_segment_distance(
+                la,
+                qa,
+                qb,
+            ),
+            _point_segment_distance(
+                lb,
+                qa,
+                qb,
+            ),
+        ),
+        dim=-1,
+    ).min(
+        dim=-1
+    ).values
+
+    q_vector = (
+        qb
+        -
+        qa
+    )
+
+    lane_vector = (
+        lb
+        -
+        la
+    )
+
+    o1 = _cross_2d(
+        q_vector,
+        la - qa,
+    )
+
+    o2 = _cross_2d(
+        q_vector,
+        lb - qa,
+    )
+
+    o3 = _cross_2d(
+        lane_vector,
+        qa - la,
+    )
+
+    o4 = _cross_2d(
+        lane_vector,
+        qb - la,
+    )
+
+    eps = 1e-8
+
+    query_straddles = (
+        (
+            (o1 >= -eps)
+            &
+            (o2 <= eps)
+        )
+        |
+        (
+            (o2 >= -eps)
+            &
+            (o1 <= eps)
+        )
+    )
+
+    lane_straddles = (
+        (
+            (o3 >= -eps)
+            &
+            (o4 <= eps)
+        )
+        |
+        (
+            (o4 >= -eps)
+            &
+            (o3 <= eps)
+        )
+    )
+
+    query_min = torch.minimum(
+        qa,
+        qb,
+    )
+
+    query_max = torch.maximum(
+        qa,
+        qb,
+    )
+
+    lane_min = torch.minimum(
+        la,
+        lb,
+    )
+
+    lane_max = torch.maximum(
+        la,
+        lb,
+    )
+
+    bbox_overlap = (
+        (
+            torch.maximum(
+                query_min[..., 0],
+                lane_min[..., 0],
+            )
+            <=
+            torch.minimum(
+                query_max[..., 0],
+                lane_max[..., 0],
+            )
+            +
+            eps
+        )
+        &
+        (
+            torch.maximum(
+                query_min[..., 1],
+                lane_min[..., 1],
+            )
+            <=
+            torch.minimum(
+                query_max[..., 1],
+                lane_max[..., 1],
+            )
+            +
+            eps
+        )
+    )
+
+    intersects = (
+        query_straddles
+        &
+        lane_straddles
+        &
+        bbox_overlap
+    )
+
+    centerline_distance = torch.where(
+        intersects,
+        torch.zeros_like(
+            endpoint_distance
+        ),
+        endpoint_distance,
+    )
+
+    corridor_distance = (
+        centerline_distance
+        -
+        lane_half_width[
+            :,
+            None,
+        ]
+    ).clamp_min(
+        0.0
+    )
+
+    valid = lane_valid[
+        :,
+        None,
+    ]
+
+    corridor_distance = corridor_distance.masked_fill(
+        ~valid,
+        torch.finfo(
+            corridor_distance.dtype
+        ).max,
+    )
+
+    minimum = corridor_distance.flatten(
+        start_dim=2
+    ).min(
+        dim=-1
+    ).values
+
+    overlap = (
+        (
+            corridor_distance
+            <=
+            1e-4
+        )
+        &
+        valid
+    ).flatten(
+        start_dim=2
+    ).any(
+        dim=-1
+    )
+
+    has_lane = lane_valid.flatten(
+        start_dim=1
+    ).any(
+        dim=1
+    )
+
+    minimum = torch.where(
+        has_lane[
+            :,
+            None,
+        ],
+        minimum,
+        torch.zeros_like(
+            minimum
+        ),
+    )
+
+    overlap = (
+        overlap
+        &
+        has_lane[
+            :,
+            None,
+        ]
+    )
+
+    return (
+        minimum,
+        overlap,
+    )
+    
 class WorkZoneEncoder(nn.Module):
     """Encode structured WorkZone geometry with typed self-attention."""
 
@@ -23,7 +621,7 @@ class WorkZoneEncoder(nn.Module):
 
         self.feature_encoder = nn.Sequential(
             nn.Linear(
-                10,
+                12,
                 d_model,
             ),
             nn.ReLU(),
@@ -62,6 +660,9 @@ class WorkZoneEncoder(nn.Module):
         wz_feat: torch.Tensor,
         worker_feat: torch.Tensor,
         ego_speed: torch.Tensor | None = None,
+        lane_feat: torch.Tensor | None = None,
+        lane_point_mask: torch.Tensor | None = None,
+        lane_mask: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """Return typed WZ token states and a pooled WZ context."""
         if wz_feat.ndim != 3 or wz_feat.shape[1:] != (5, 3):
@@ -75,6 +676,12 @@ class WorkZoneEncoder(nn.Module):
             )
 
         batch_size = wz_feat.shape[0]
+
+        lane_geometry = _lane_segment_geometry(
+            lane_feat,
+            lane_point_mask,
+            lane_mask,
+        )
 
         corners = wz_feat[
             :,
@@ -186,6 +793,28 @@ class WorkZoneEncoder(nn.Module):
             outward_cw,
         )
 
+        boundary_lane_distance, boundary_lane_overlap = (
+            _segments_to_lane_distance(
+                corners,
+                next_corner,
+                lane_geometry,
+            )
+        )
+        
+        boundary_lane_distance = torch.where(
+            edge_valid,
+            boundary_lane_distance,
+            torch.zeros_like(
+                boundary_lane_distance
+            ),
+        )
+        
+        boundary_lane_overlap = (
+            boundary_lane_overlap
+            &
+            edge_valid
+        )
+
         edge_features = torch.cat(
             (
                 midpoint,
@@ -195,10 +824,17 @@ class WorkZoneEncoder(nn.Module):
                 tangent,
                 outward,
                 edge_length[..., None],
+                boundary_lane_distance[..., None],
+                boundary_lane_overlap[
+                    ...,
+                    None,
+                ].to(
+                    midpoint.dtype
+                ),
             ),
             dim=-1,
         )
-
+        
         polygon_valid = corner_valid.all(
             dim=1
         )
@@ -228,6 +864,67 @@ class WorkZoneEncoder(nn.Module):
             :,
             0,
         ]
+        
+        polygon_lane_overlap = boundary_lane_overlap.any(
+            dim=1
+        )
+        
+        if (
+            lane_feat is not None
+            and
+            lane_point_mask is not None
+            and
+            lane_mask is not None
+        ):
+            valid_lane_point = (
+                lane_point_mask.bool()
+                &
+                lane_mask.bool()[
+                    :,
+                    :,
+                    None,
+                ]
+            )
+        
+            for b in range(batch_size):
+                if (
+                    bool(
+                        polygon_valid[b]
+                    )
+                    and
+                    bool(
+                        valid_lane_point[b].any()
+                    )
+                ):
+                    represented_points = lane_feat[
+                        b,
+                        ...,
+                        :2,
+                    ][
+                        valid_lane_point[b]
+                    ]
+        
+                    if bool(
+                        points_in_polygon(
+                            represented_points,
+                            corners[b],
+                        ).any()
+                    ):
+                        polygon_lane_overlap[
+                            b
+                        ] = True
+        
+        polygon_lane_distance = boundary_lane_distance.min(
+            dim=1
+        ).values
+        
+        polygon_lane_distance = torch.where(
+            polygon_lane_overlap,
+            torch.zeros_like(
+                polygon_lane_distance
+            ),
+            polygon_lane_distance,
+        )
 
         polygon_features = torch.stack(
             (
@@ -260,6 +957,32 @@ class WorkZoneEncoder(nn.Module):
         sign_distance = torch.linalg.vector_norm(
             sign_xy,
             dim=-1,
+        )
+
+        sign_lane_distance = _points_to_lane_distance(
+            sign_xy[
+                :,
+                None,
+            ],
+            lane_geometry,
+        ).squeeze(
+            1
+        )
+        
+        sign_on_lane = (
+            sign_lane_distance
+            <=
+            1e-4
+        ).to(
+            sign_distance.dtype
+        )
+        
+        sign_boundary_distance = torch.zeros_like(
+            sign_distance
+        )
+        
+        sign_inside = torch.zeros_like(
+            sign_distance
         )
 
         sign_ahead = (
@@ -516,4 +1239,12 @@ class WorkZoneEncoder(nn.Module):
             "wz_token_xy": token_xy,
             "wz_context": context,
             "wz_valid": original_valid,
+            "boundary_lane_distance": boundary_lane_distance,
+            "boundary_lane_overlap": boundary_lane_overlap,
+            "polygon_lane_distance": polygon_lane_distance,
+            "polygon_lane_overlap": polygon_lane_overlap,
+            "sign_lane_distance": sign_lane_distance,
+            "worker_lane_distance": worker_lane_distance,
+            "worker_boundary_distance": worker_boundary_distance,
+            "worker_inside": worker_inside,
         }
