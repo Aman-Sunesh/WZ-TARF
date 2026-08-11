@@ -365,6 +365,18 @@ def main() -> None:
                 "fps"
             ]
         ),
+        goal_association_tolerance_m=float(
+            training_config.get(
+                "goal_association_tolerance_m",
+                0.25,
+            )
+        ),
+        road_gt_tolerance_m=float(
+            training_config.get(
+                "road_gt_tolerance_m",
+                0.25,
+            )
+        ),
         grad_clip_norm=training_config.get(
             "grad_clip_norm"
         ),
