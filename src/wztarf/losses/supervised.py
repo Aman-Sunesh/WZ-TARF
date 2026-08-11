@@ -334,17 +334,17 @@ def supervised_loss(
             fps=fps,
         )
 
-    if (
-        "goal_offset" in model_output
-        and generated_targets is not None
-    ):
+        if (
+            "goal_offset" in model_output
+            and generated_targets is not None
+        ):
             components["route"] = route_loss(
                 route_anchors,
                 anchor_target,
                 winner_idx,
                 goal_offset_pred=model_output["goal_offset"],
-            goal_offset_target=generated_targets.goal_offset_target,
-            lane_goal_mask=generated_targets.lane_goal_mask,
+                goal_offset_target=generated_targets.goal_offset_target,
+                lane_goal_mask=generated_targets.lane_goal_mask,
             )
 
         else:
