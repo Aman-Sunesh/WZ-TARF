@@ -554,66 +554,6 @@ class LaneEncoder(nn.Module):
                         b,
                         neighbors,
                     ] = True
- 
-            valid_edges = torch.nonzero(
-                lane_edge_mask[b].bool(),
-                as_tuple=False,
-            ).flatten()
-
-            if valid_edges.numel() == 0:
-                continue
-
-            src = lane_edge_index[
-                b,
-                0,
-                valid_edges,
-            ].long()
-
-            dst = lane_edge_index[
-                b,
-                1,
-                valid_edges,
-            ].long()
-
-            in_bounds = (
-                (src >= 0)
-                &
-                (dst >= 0)
-                &
-                (src < num_lanes)
-                &
-                (dst < num_lanes)
-            )
-
-            src = src[
-                in_bounds
-            ]
-            dst = dst[
-                in_bounds
-            ]
-
-            for seed in seeds:
-                connected = (
-                    (src == seed)
-                    |
-                    (dst == seed)
-                )
-
-                neighbors = torch.cat(
-                    (
-                        src[
-                            connected
-                        ],
-                        dst[
-                            connected
-                        ],
-                    )
-                )
-
-                active_mask[
-                    b,
-                    neighbors,
-                ] = True
 
         active_mask &= valid_lane
 
