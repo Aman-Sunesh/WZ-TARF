@@ -243,7 +243,9 @@ class TopologyHeads(nn.Module):
             edge_logits[
                 b,
                 valid_edges,
-            ] = logits
+            ] = logits.to(
+                dtype=edge_logits.dtype
+            )
 
             predicted_edge_mask[
                 b,
