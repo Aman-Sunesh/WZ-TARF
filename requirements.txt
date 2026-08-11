@@ -2,3 +2,4 @@ numpy>=1.24
 PyYAML>=6.0
 torch>=2.3
 pytest>=8.0
+tqdm
