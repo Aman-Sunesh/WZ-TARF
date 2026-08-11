@@ -679,6 +679,8 @@ class WZTARF(nn.Module):
             horizon_context=scene["horizon_context"],
             lane_states=scene["lane_states"],
             lane_mask=scene["lane_mask"],
+            lane_centerline=lane["lane_centerline"],
+            lane_point_mask=lane["lane_point_mask"],
         )
 
         map_exit_goal = self.map_exit_head(
