@@ -177,12 +177,11 @@ class Trainer:
             )
 
         self.use_amp = (
-            bool(use_amp)
+            bool(
+                use_amp
+            )
             and
-            self.device.type in {
-                "cuda",
-                "cpu",
-            }
+            self.device.type == "cuda"
         )
 
         self.amp_dtype = amp_dtype
@@ -670,6 +669,16 @@ class Trainer:
                 best_epoch = epoch
                 bad_epochs = 0
 
+            else:
+                bad_epochs += 1
+
+            # Step before checkpointing so resumed training restores the
+            # scheduler state corresponding to the completed epoch.
+            self._step_scheduler(
+                validation_metrics
+            )
+
+            if improved:
                 save_checkpoint(
                     self.checkpoint_dir
                     /
@@ -689,9 +698,6 @@ class Trainer:
                         ),
                     },
                 )
-
-            else:
-                bad_epochs += 1
 
             # Always maintain a resumable last-state checkpoint.
             save_checkpoint(
@@ -735,10 +741,6 @@ class Trainer:
                     f"best={best_metric:.6f}, "
                     f"lr={_current_learning_rate(self.optimizer):.8g}"
                 )
-
-            self._step_scheduler(
-                validation_metrics
-            )
 
             if (
                 patience is not None
