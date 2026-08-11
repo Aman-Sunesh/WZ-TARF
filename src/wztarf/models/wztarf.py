@@ -451,38 +451,38 @@ class WZTARF(nn.Module):
                 0.0,
             )
 
-+            control_features = control_features.masked_fill(
-+                mask_plan.controls[
-+                    ...,
-+                    None,
-+                ],
-+                0.0,
-+            )
-+
-+            control_mask = (
-+                control_mask
-+                &
-+                ~mask_plan.controls
-+            )
-+
-+            gaze_features = gaze_features.masked_fill(
-+                mask_plan.gaze[
-+                    ...,
-+                    None,
-+                ],
-+                0.0,
-+            )
-+
-+            gaze_mask = (
-+                gaze_mask
-+                &
-+                ~mask_plan.gaze
-+            )
-+
-+            agent_mask = (
-+                agent_mask
-+                &
-+                ~mask_plan.agents
+            control_features = control_features.masked_fill(
+                mask_plan.controls[
+                    ...,
+                    None,
+                ],
+                0.0,
+            )
+
+            control_mask = (
+                control_mask
+                &
+                ~mask_plan.controls
+            )
+
+            gaze_features = gaze_features.masked_fill(
+                mask_plan.gaze[
+                    ...,
+                    None,
+                ],
+                0.0,
+            )
+
+            gaze_mask = (
+                gaze_mask
+                &
+                ~mask_plan.gaze
+            )
+
+            agent_mask = (
+                agent_mask
+                &
+                ~mask_plan.agents
             )
 
             lane_point_mask = (
