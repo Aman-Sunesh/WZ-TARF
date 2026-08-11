@@ -5,9 +5,14 @@ from dataclasses import dataclass
 
 import torch
 
-from wztarf.geometry.lanes import lane_bounds, reconstruct_lane_polygons,
-from wztarf.geometry.workzone import points_in_polygon
-
+from wztarf.geometry.lanes import (
+    lane_bounds,
+    reconstruct_lane_polygon,
+)
+from wztarf.geometry.workzone import (
+    distance_to_polygon,
+    points_in_polygon,
+)
 
 @dataclass(frozen=True)
 class GoalTarget:
@@ -158,74 +163,69 @@ def distance_to_lane_union(
     lane_point_mask: torch.Tensor,
     lane_mask: torch.Tensor,
 ) -> torch.Tensor:
-    """Return distance from each point to the represented lane union.
+    """Return distance from each point to the represented lane union."""
+    distances: list[torch.Tensor] = []
 
-    Distance is exactly zero when a point lies inside at least one
-    reconstructed lane polygon.
+    for lane_index in range(
+        lane_feat.shape[0]
+    ):
+        if not bool(
+            lane_mask[
+                lane_index
+            ]
+        ):
+            continue
 
-    For points outside all lane polygons, the result is minimum Euclidean
-    distance to any represented lane boundary.
-
-    Args:
-        points:
-            `[N, 2]`.
-
-    Returns:
-        `[N]` distances in meters.
-    """
-    if points.ndim != 2 or points.shape[-1] != 2:
-        raise ValueError(
-            "points must have shape [N, 2]."
+        polygon = reconstruct_lane_polygon(
+            lane_feat[
+                lane_index
+            ],
+            lane_point_mask[
+                lane_index
+            ],
         )
 
-    polygons = reconstruct_lane_polygons(
-        lane_feat,
-        lane_point_mask,
-        lane_mask,
-    )
+        if polygon is None:
+            continue
 
-    if not polygons:
-        raise ValueError(
-            "Cannot compute lane-union distance because no valid "
-            "lane polygons exist."
+        boundary_distance = distance_to_polygon(
+            points,
+            polygon,
         )
 
-    best_distance = torch.full(
-        (points.shape[0],),
-        float("inf"),
-        dtype=points.dtype,
-        device=points.device,
-    )
-
-    inside_any = torch.zeros(
-        points.shape[0],
-        dtype=torch.bool,
-        device=points.device,
-    )
-
-    for polygon in polygons:
         inside = points_in_polygon(
             points,
             polygon,
         )
 
-        inside_any |= inside
-
-        edge_distance = _point_to_polygon_edge_distance(
-            points,
-            polygon,
+        lane_distance = torch.where(
+            inside,
+            torch.zeros_like(
+                boundary_distance
+            ),
+            boundary_distance,
         )
 
-        best_distance = torch.minimum(
-            best_distance,
-            edge_distance,
+        distances.append(
+            lane_distance
         )
 
-    return torch.where(
-        inside_any,
-        torch.zeros_like(best_distance),
-        best_distance,
-    )
+    if not distances:
+        return torch.full(
+            (
+                points.shape[0],
+            ),
+            float("inf"),
+            dtype=points.dtype,
+            device=points.device,
+        )
+
+    return torch.stack(
+        distances,
+        dim=0,
+    ).min(
+        dim=0
+    ).values
 
 
 def build_road_reliability_mask(
