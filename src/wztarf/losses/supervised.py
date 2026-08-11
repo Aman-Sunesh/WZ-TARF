@@ -22,7 +22,7 @@ from .trajectory import (
 )
 from .worker_clearance import worker_clearance_loss
 from .workzone_geometry import workzone_geometry_loss
-
+from wztarf.data.targets import build_supervised_targets
 
 @dataclass(frozen=True)
 class LossWeights:
@@ -158,6 +158,8 @@ def supervised_loss(
     wz_temperature_m: float = 0.25,
     road_tolerance_m: float = 0.25,
     diversity_separation_m: float = 1.0,
+    goal_association_tolerance_m: float = 0.25,
+    road_gt_tolerance_m: float = 0.25,
 ) -> SupervisedLossOutput:
     """Compute the complete supervised WZ-TARF objective.
 
