@@ -1,1 +1,7 @@
-"""Mode probability and safety-aware scoring heads."""
+"""Expose safety-aware trajectory mode scoring."""
+
+from .safety_scorer import SafetyAwareScorer
+
+__all__ = [
+    "SafetyAwareScorer",
+]
