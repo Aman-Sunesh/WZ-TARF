@@ -118,8 +118,12 @@ def points_in_polygon(
 
         previous = current
 
-    return inside
+    boundary = points_on_polygon_boundary(
+        points,
+        polygon,
+    )
 
+    return inside | boundary
 
 def distance_to_polygon(
     points: torch.Tensor,
