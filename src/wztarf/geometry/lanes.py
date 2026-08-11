@@ -380,3 +380,126 @@ def polyline_longitudinal_offset(
             closest
         ]
     )
+
+
+def lane_edge_relation_features(
+    lane_xy: torch.Tensor,
+    lane_heading: torch.Tensor,
+    src: torch.Tensor,
+    dst: torch.Tensor,
+) -> torch.Tensor:
+    """Build explicit geometric relation features for directed lane edges.
+
+    Args:
+        lane_xy:
+            Representative lane positions [L, 2].
+
+        lane_heading:
+            Unit lane heading vectors [L, 2] stored as
+            [cos(psi), sin(psi)].
+
+        src:
+            Source lane indices [E].
+
+        dst:
+            Destination lane indices [E].
+
+    Returns:
+        Relation tensor [E, 7]:
+
+            [
+                delta_x,
+                delta_y,
+                rho,
+                sin(theta),
+                cos(theta),
+                sin(delta_psi),
+                cos(delta_psi),
+            ]
+    """
+    if lane_xy.ndim != 2 or lane_xy.shape[-1] != 2:
+        raise ValueError(
+            "lane_xy must have shape [L, 2]."
+        )
+
+    if lane_heading.shape != lane_xy.shape:
+        raise ValueError(
+            "lane_heading must have shape [L, 2]."
+        )
+
+    delta = (
+        lane_xy[dst]
+        -
+        lane_xy[src]
+    )
+
+    rho = torch.linalg.vector_norm(
+        delta,
+        dim=-1,
+    )
+
+    sin_theta = (
+        delta[:, 1]
+        /
+        rho.clamp_min(1e-8)
+    )
+
+    cos_theta = (
+        delta[:, 0]
+        /
+        rho.clamp_min(1e-8)
+    )
+
+    src_heading = lane_heading[src]
+    dst_heading = lane_heading[dst]
+
+    src_heading = (
+        src_heading
+        /
+        torch.linalg.vector_norm(
+            src_heading,
+            dim=-1,
+            keepdim=True,
+        ).clamp_min(1e-8)
+    )
+
+    dst_heading = (
+        dst_heading
+        /
+        torch.linalg.vector_norm(
+            dst_heading,
+            dim=-1,
+            keepdim=True,
+        ).clamp_min(1e-8)
+    )
+
+    sin_delta_heading = (
+        src_heading[:, 0]
+        *
+        dst_heading[:, 1]
+        -
+        src_heading[:, 1]
+        *
+        dst_heading[:, 0]
+    )
+
+    cos_delta_heading = (
+        src_heading
+        *
+        dst_heading
+    ).sum(
+        dim=-1
+    )
+
+    return torch.stack(
+        (
+            delta[:, 0],
+            delta[:, 1],
+            rho,
+            sin_theta,
+            cos_theta,
+            sin_delta_heading,
+            cos_delta_heading,
+        ),
+        dim=-1,
+    )
