@@ -546,7 +546,7 @@ class WZTARF(nn.Module):
         ego_states, ego_context, control_gate = self.control_fusion(
             motion_states,
             control_states,
-            ontrol_mask,
+            control_mask,
             gate_features,
         )
 
