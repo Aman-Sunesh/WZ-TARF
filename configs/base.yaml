@@ -7,6 +7,11 @@ data:
   history_steps: 10
   future_steps: 25
   num_modes: 6
+  train_split: train
+  val_split: val
+  test_split: test
+  num_workers: 0
+  pin_memory: true
 
 model:
   d_model: 128
@@ -14,30 +19,51 @@ model:
   control_hidden: 64
   gaze_hidden: 64
   agent_hidden: 64
+
   top_seed_lanes: 4
   lane_graph_layers: 2
   topology_layers: 2
   num_edge_types: 16
+
   num_modes: 6
   fps: 5
   history_steps: 10
   future_steps: 25
+
   use_refiner: false
   refiner_radius_m: 8.0
 
 training:
   epochs: 64
   batch_size: 8
+
   learning_rate: 0.0005
   weight_decay: 0.0001
+
   beta_assign: 0.25
+  classification_temperature: 1.0
+
+  grad_clip_norm: 5.0
+  use_amp: true
+
+  selection_metric: minADE_6
+  selection_mode: min
+  patience: 12
+
+  scheduler:
+    type: cosine
+    eta_min: 0.00001
 
 loss_weights:
   trajectory: 1.0
   endpoint: 0.25
   classification: 1.0
-  lane: 1.0
+
+  # Enable after lane/MAP_EXIT target construction is wired into the dataset.
+  lane: 0.0
+
   route: 1.0
+
   angle: 0.0
   dynamics: 0.0
   diversity: 0.0
@@ -46,8 +72,38 @@ loss_weights:
   worker: 0.0
   refinement: 0.0
 
+pretraining:
+  epochs: 40
+  batch_size: 8
+
+  learning_rate: 0.0005
+  weight_decay: 0.0001
+
+  grad_clip_norm: 5.0
+  use_amp: true
+  patience: 10
+
+  fac_temperature: 0.1
+  fac_exclusion_seconds: 5.0
+  fac_symmetric: false
+
+  weights:
+    masked_reconstruction: 1.0
+    future_contrastive: 1.0
+    topology: 1.0
+
+  masking:
+    temporal_ratio: 0.25
+    agent_ratio: 0.25
+    lane_ratio: 0.25
+    workzone_ratio: 0.25
+    worker_ratio: 0.25
+    primary_ratio: 0.60
+
 evaluation:
+  batch_size: 8
   miss_threshold_m: 2.0
   worker_threshold_m: 2.0
+
   latency_warmup: 20
   latency_iterations: 200
