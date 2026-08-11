@@ -28,6 +28,7 @@ from wztarf.pretraining.masking import (
 from wztarf.pretraining.topology_reconstruction import (
     topology_reconstruction_loss,
 )
+from wztarf.pretraining.topology_targets import build_topology_targets
 from wztarf.reporting.run_logger import RunLogger
 from wztarf.training.checkpointing import (
     CheckpointState,
@@ -213,12 +214,11 @@ class Pretrainer:
             )
 
         self.use_amp = (
-            bool(use_amp)
+            bool(
+                use_amp
+            )
             and
-            self.device.type in {
-                "cuda",
-                "cpu",
-            }
+            self.device.type == "cuda"
         )
 
         self.amp_dtype = amp_dtype
@@ -529,6 +529,43 @@ class Pretrainer:
         # --------------------------------------------------------------
 
         if self.weights.topology > 0:
+            targets = build_topology_targets(
+                lane_feat=batch[
+                    "lane_feat"
+                ],
+                lane_point_mask=batch[
+                    "lane_point_mask"
+                ],
+                lane_mask=batch[
+                    "lane_mask"
+                ],
+                lane_edge_index=batch[
+                    "lane_edge_index"
+                ],
+                lane_edge_mask=batch[
+                    "lane_edge_mask"
+                ],
+                wz_feat=batch[
+                    "wz_feat"
+                ],
+            )
+
+            valid_lane = (
+                targets.lane_mask
+                &
+                output[
+                    "topology_lane_mask"
+                ].bool()
+            )
+
+            valid_edge = (
+                targets.edge_mask
+                &
+                output[
+                    "topology_edge_mask"
+                ].bool()
+            )
+
             components[
                 "topology"
             ] = topology_reconstruction_loss(
