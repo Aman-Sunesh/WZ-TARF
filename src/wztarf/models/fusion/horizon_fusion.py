@@ -194,7 +194,9 @@ class HorizonFusion(nn.Module):
 
             scores = scores.masked_fill(
                 ~validity,
-                -1e9,
+                torch.finfo(
+                    scores.dtype
+                ).min,
             )
 
             weights = torch.softmax(
