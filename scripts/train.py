@@ -39,6 +39,8 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Train WZ-TARF."
     )
+    
+    parser.add_argument(
         "--config",
         type=Path,
         default=PROJECT_ROOT / "configs" / "base.yaml",
