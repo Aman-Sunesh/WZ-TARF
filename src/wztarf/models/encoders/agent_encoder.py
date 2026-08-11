@@ -153,17 +153,17 @@ class AgentEncoder(nn.Module):
             self.output_dim,
         )
 
-      agent_temporal_states = projected_temporal.reshape(
-          batch_size,
-          num_agents,
-          history_steps,
-          self.output_dim,
-      ).permute(
-          0,
-          2,
-          1,
-          3,
-      )
+        agent_temporal_states = projected_temporal.reshape(
+            batch_size,
+            num_agents,
+            history_steps,
+            self.output_dim,
+        ).permute(
+            0,
+            2,
+            1,
+            3,
+        )
 
         agent_present = present.reshape(
             batch_size,
