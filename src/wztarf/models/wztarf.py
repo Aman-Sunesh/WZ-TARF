@@ -562,13 +562,16 @@ class WZTARF(nn.Module):
         )
 
         workzone = self.workzone_encoder(
-        wz_feat,
-        worker_feat,
-        ego_speed=motion_features[
-            :,
-            -1,
-            9,
-        ],
+            wz_feat,
+            worker_feat,
+            ego_speed=motion_features[
+                :,
+                -1,
+                9,
+            ],
+            lane_feat=lane_feat,
+            lane_point_mask=lane_point_mask,
+            lane_mask=batch["lane_mask"],
         )
 
         lane = self.lane_encoder(
@@ -593,6 +596,8 @@ class WZTARF(nn.Module):
             batch["lane_edge_type"],
             batch["lane_edge_mask"],
             workzone["wz_context"],
+            lane_xy=lane["lane_xy"],
+            lane_heading=lane["lane_heading"],
         )
 
         agent_valid = agent[
