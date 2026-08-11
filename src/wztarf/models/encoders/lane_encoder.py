@@ -771,6 +771,7 @@ class LaneEncoder(nn.Module):
             ].to(
                 center.dtype
             )
+        )
 
         return {
             "lane_point_states": (
