@@ -146,6 +146,7 @@ class Pretrainer:
         fac_exclusion_seconds: float = 5.0,
         fac_symmetric: bool = False,
         scheduler_metric: str | None = None,
+        mask_seed: int = 2023,
     ) -> None:
         """Create the Phase A pretrainer."""
         self.model = model
@@ -194,6 +195,9 @@ class Pretrainer:
         self.fac_exclusion_seconds = fac_exclusion_seconds
         self.fac_symmetric = fac_symmetric
         self.scheduler_metric = scheduler_metric
+        self.mask_seed = int(
+            mask_seed
+        )
 
         if (
             grad_clip_norm is not None
@@ -613,6 +617,17 @@ class Pretrainer:
         else:
             self.model.eval()
 
+        mask_generator = None
+
+        if not training:
+            mask_generator = torch.Generator(
+                device=self.device
+            )
+
+            mask_generator.manual_seed(
+                self.mask_seed
+            )
+
         running: dict[str, float] = defaultdict(
             float
         )
@@ -628,6 +643,7 @@ class Pretrainer:
             mask_plan = build_mask_plan(
                 batch,
                 config=self.masking_config,
+                generator=mask_generator,
             )
 
             if training:
