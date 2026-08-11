@@ -683,6 +683,22 @@ class WorkZoneEncoder(nn.Module):
             lane_mask,
         )
 
+     
+        if lane_geometry is None:
+            lane_available = torch.zeros(
+                batch_size,
+                dtype=torch.bool,
+                device=wz_feat.device,
+            )
+        else:
+            lane_available = lane_geometry[
+                3
+            ].flatten(
+                start_dim=1
+            ).any(
+                dim=1
+            )
+
         corners = wz_feat[
             :,
             :4,
@@ -938,6 +954,10 @@ class WorkZoneEncoder(nn.Module):
                 signed_area.abs(),
                 orientation[:, 1],
                 orientation[:, 0],
+            polygon_lane_distance,
+            polygon_lane_overlap.to(
+                polygon_center.dtype
+            ),
             ),
             dim=-1,
         )[:, None, :]
@@ -970,13 +990,17 @@ class WorkZoneEncoder(nn.Module):
         )
         
         sign_on_lane = (
-            sign_lane_distance
-            <=
-            1e-4
+            (
+                sign_lane_distance
+                <=
+                1e-4
+            )
+            &
+            lane_available
         ).to(
             sign_distance.dtype
         )
-        
+
         sign_boundary_distance = torch.zeros_like(
             sign_distance
         )
@@ -1011,22 +1035,6 @@ class WorkZoneEncoder(nn.Module):
                     safe_speed
                 ),
             )
-
-        sign_features = torch.stack(
-            (
-                sign_xy[:, 0],
-                sign_xy[:, 1],
-                sign_distance,
-                sign_xy[:, 1] / (sign_distance + 1e-8),
-                sign_xy[:, 0] / (sign_distance + 1e-8),
-                sign_ahead,
-                time_to_passage,
-                torch.zeros_like(sign_distance),
-                torch.zeros_like(sign_distance),
-                torch.zeros_like(sign_distance),
-            ),
-            dim=-1,
-        )[:, None, :]
 
         worker_xy = worker_feat[
             ...,
@@ -1066,14 +1074,52 @@ class WorkZoneEncoder(nn.Module):
                 ),
             )
 
+        worker_boundary_distance = torch.zeros_like(
+            worker_distance
+        )
+
         worker_inside = torch.zeros_like(
             worker_distance
         )
 
         for b in range(batch_size):
-            if bool(
+            if not bool(
                 polygon_valid[b]
             ):
+                continue
+    
+            if bool(
+                sign_valid[b]
+            ):
+                sign_boundary_distance[
+                    b
+                ] = distance_to_polygon(
+                    sign_xy[
+                        b:
+                        b + 1
+                    ],
+                    corners[b],
+                )[0]
+    
+                sign_inside[
+                    b
+                ] = points_in_polygon(
+                    sign_xy[
+                        b:
+                        b + 1
+                    ],
+                    corners[b],
+                )[0].to(
+                    sign_distance.dtype
+                )
+    
+            if worker_xy.shape[1] > 0:
+                worker_boundary_distance[
+                    b
+                ] = distance_to_polygon(
+                    worker_xy[b],
+                    corners[b],
+                )
                 worker_inside[
                     b
                 ] = points_in_polygon(
@@ -1082,6 +1128,57 @@ class WorkZoneEncoder(nn.Module):
                 ).to(
                     worker_distance.dtype
                 )
+
+        worker_lane_distance = _points_to_lane_distance(
+            worker_xy,
+            lane_geometry,
+        )
+    
+        worker_on_lane = (
+            (
+                worker_lane_distance
+                <=
+                1e-4
+            )
+            &
+            lane_available[
+                :,
+                None,
+            ]
+        ).to(
+            worker_distance.dtype
+        )
+
+        sign_signed_boundary_distance = torch.where(
+            sign_inside.bool(),
+            -sign_boundary_distance,
+            sign_boundary_distance,
+        )
+    
+        worker_signed_boundary_distance = torch.where(
+            worker_inside.bool(),
+            -worker_boundary_distance,
+            worker_boundary_distance,
+        )
+    
+        sign_features = torch.stack(
+            (
+                sign_xy[:, 0],
+                sign_xy[:, 1],
+                sign_distance,
+                sign_xy[:, 1] / (sign_distance + 1e-8),
+                sign_xy[:, 0] / (sign_distance + 1e-8),
+                sign_ahead,
+                time_to_passage,
+                sign_lane_distance,
+                sign_on_lane,
+                sign_boundary_distance,
+                sign_inside,
+                sign_signed_boundary_distance,
+            ),
+            dim=-1,
+        )[:, None, :]
+
 
         worker_features = torch.stack(
             (
@@ -1093,8 +1190,10 @@ class WorkZoneEncoder(nn.Module):
                 worker_ahead,
                 worker_ttp,
                 worker_inside,
-                torch.zeros_like(worker_distance),
-                torch.zeros_like(worker_distance),
+            worker_lane_distance,
+            worker_boundary_distance,
+            worker_on_lane,
+            worker_signed_boundary_distance,
             ),
             dim=-1,
         )
