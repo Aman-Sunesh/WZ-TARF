@@ -656,8 +656,14 @@ class Pretrainer:
         )
 
         num_batches = 0
+        epoch_start = time.perf_counter()
+        total_batches = len(dataloader)
 
-        for batch in dataloader:
+
+        for batch_index, batch in enumerate(
+            dataloader,
+            start=1,
+        ):
             batch = _move_to_device(
                 batch,
                 self.device,
@@ -766,6 +772,29 @@ class Pretrainer:
                 )
 
             num_batches += 1
+
+            if (
+                batch_index == 1
+                or batch_index % 50 == 0
+                or batch_index == total_batches
+            ):
+                elapsed = time.perf_counter() - epoch_start
+                rate = batch_index / max(elapsed, 1e-8)
+                remaining = (
+                    total_batches - batch_index
+                ) / max(rate, 1e-8)
+
+                mode = "TRAIN" if training else "VAL"
+
+                print(
+                    f"[Phase A][{mode}] "
+                    f"Epoch {epoch} | "
+                    f"{batch_index}/{total_batches} | "
+                    f"loss={total_loss.detach().item():.4f} | "
+                    f"{rate:.2f} batch/s | "
+                    f"ETA={remaining / 60.0:.1f} min",
+                    flush=True,
+                )
 
         if num_batches == 0:
             raise ValueError(
