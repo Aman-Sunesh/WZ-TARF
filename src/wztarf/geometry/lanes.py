@@ -239,3 +239,169 @@ def lane_bounds(
             maximum[1] + margin_m,
         )
     )
+
+
+def reconstruct_lane_polygon(
+    lane_feat: torch.Tensor,
+    lane_point_mask: torch.Tensor,
+) -> torch.Tensor | None:
+    """Reconstruct one lane polygon from center and boundary offsets."""
+    if lane_feat.ndim != 2 or lane_feat.shape[-1] < 8:
+        raise ValueError(
+            "lane_feat must have shape [P, F] with F >= 8."
+        )
+
+    if lane_point_mask.shape != lane_feat.shape[:1]:
+        raise ValueError(
+            "lane_point_mask must have shape [P]."
+        )
+
+    valid = lane_point_mask.bool()
+
+    if int(
+        valid.sum().item()
+    ) < 2:
+        return None
+
+    feature = lane_feat[
+        valid
+    ]
+
+    center = feature[
+        :,
+        0:2,
+    ]
+
+    left = (
+        center
+        +
+        feature[
+            :,
+            4:6,
+        ]
+    )
+
+    right = (
+        center
+        +
+        feature[
+            :,
+            6:8,
+        ]
+    )
+
+    return torch.cat(
+        (
+            left,
+            torch.flip(
+                right,
+                dims=(0,),
+            ),
+        ),
+        dim=0,
+    )
+
+
+def polyline_longitudinal_offset(
+    point: torch.Tensor,
+    polyline: torch.Tensor,
+) -> torch.Tensor:
+    """Project one point onto a polyline and return arc-length position."""
+    if point.shape != (2,):
+        raise ValueError(
+            "point must have shape [2]."
+        )
+
+    if polyline.ndim != 2 or polyline.shape[-1] != 2:
+        raise ValueError(
+            "polyline must have shape [P, 2]."
+        )
+
+    if polyline.shape[0] < 2:
+        return point.sum() * 0.0
+
+    start = polyline[:-1]
+    end = polyline[1:]
+
+    segment = (
+        end
+        -
+        start
+    )
+
+    length = torch.linalg.vector_norm(
+        segment,
+        dim=-1,
+    )
+
+    length_sq = (
+        segment
+        *
+        segment
+    ).sum(
+        dim=-1
+    ).clamp_min(
+        1e-8
+    )
+
+    alpha = (
+        (
+            point[None]
+            -
+            start
+        )
+        *
+        segment
+    ).sum(
+        dim=-1
+    ) / length_sq
+
+    alpha = alpha.clamp(
+        0.0,
+        1.0,
+    )
+
+    projection = (
+        start
+        +
+        alpha[:, None]
+        *
+        segment
+    )
+
+    distance = torch.linalg.vector_norm(
+        projection
+        -
+        point[None],
+        dim=-1,
+    )
+
+    closest = distance.argmin()
+
+    cumulative = torch.cat(
+        (
+            torch.zeros(
+                1,
+                dtype=point.dtype,
+                device=point.device,
+            ),
+            torch.cumsum(
+                length,
+                dim=0,
+            ),
+        )
+    )
+
+    return (
+        cumulative[
+            closest
+        ]
+        +
+        alpha[
+            closest
+        ]
+        *
+        length[
+            closest
+        ]
+    )
