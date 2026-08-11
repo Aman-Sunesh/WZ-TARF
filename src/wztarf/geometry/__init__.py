@@ -12,6 +12,9 @@ from .relative import (
 from .workzone import (
     distance_to_polygon,
     points_in_polygon,
+    points_on_polygon_boundary,
+    polygons_intersect,
+    segments_intersect_polygon,
     signed_distance_to_polygon,
 )
 
@@ -22,6 +25,9 @@ __all__ = [
     "lane_support_points",
     "lane_bounds",
     "points_in_polygon",
+    "points_on_polygon_boundary",
     "distance_to_polygon",
     "signed_distance_to_polygon",
+    "segments_intersect_polygon",
+    "polygons_intersect",
 ]
