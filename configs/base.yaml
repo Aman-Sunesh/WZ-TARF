@@ -64,12 +64,12 @@ loss_weights:
   lane: 1.0
   route: 1.0
 
-  angle: 0.0
-  dynamics: 0.0
-  diversity: 0.0
-  road: 0.0
-  wz_geometry: 0.0
-  worker: 0.0
+  angle: 0.1
+  dynamics: 0.25
+  diversity: 0.05
+  road: 0.1
+  wz_geometry: 0.1
+  worker: 0.1
   refinement: 0.0
 
 pretraining:
