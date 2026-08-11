@@ -319,3 +319,84 @@ def load_checkpoint(
             )
         ),
     )
+
+def load_pretrained_backbone(
+    path: str | Path,
+    *,
+    model: torch.nn.Module,
+    map_location: str | torch.device = "cpu",
+    strict: bool = True,
+) -> dict[str, list[str]]:
+    """Load only the WZ-TARF backbone from a Phase A checkpoint."""
+    path = Path(
+        path
+    ).expanduser()
+
+    payload = torch.load(
+        path,
+        map_location=map_location,
+        weights_only=False,
+    )
+
+    if isinstance(
+        payload,
+        Mapping,
+    ) and "model_state_dict" in payload:
+        state_dict = payload[
+            "model_state_dict"
+        ]
+    else:
+        state_dict = payload
+
+    if not isinstance(
+        state_dict,
+        Mapping,
+    ):
+        raise TypeError(
+            "Pretraining checkpoint does not contain a state dictionary."
+        )
+
+    prefix = "backbone."
+
+    backbone_state = {
+        key[
+            len(prefix):
+        ]: value
+        for key, value in state_dict.items()
+        if key.startswith(
+            prefix
+        )
+    }
+
+    if not backbone_state:
+        raise ValueError(
+            "Checkpoint contains no 'backbone.' parameters."
+        )
+
+    incompatible = model.load_state_dict(
+        backbone_state,
+        strict=False,
+    )
+
+    missing = list(
+        incompatible.missing_keys
+    )
+
+    unexpected = list(
+        incompatible.unexpected_keys
+    )
+
+    if strict and (
+        missing
+        or unexpected
+    ):
+        raise RuntimeError(
+            "Phase A backbone does not exactly match WZTARF. "
+            f"Missing={missing}, unexpected={unexpected}"
+        )
+
+    return {
+        "missing_keys": missing,
+        "unexpected_keys": unexpected,
+    }
+
