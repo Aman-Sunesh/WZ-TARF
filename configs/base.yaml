@@ -16,8 +16,14 @@ model:
   agent_hidden: 64
   top_seed_lanes: 4
   lane_graph_layers: 2
-  route_decoder_layers: 2
+  topology_layers: 2
+  num_edge_types: 16
+  num_modes: 6
+  fps: 5
+  history_steps: 10
+  future_steps: 25
   use_refiner: false
+  refiner_radius_m: 8.0
 
 training:
   epochs: 64
