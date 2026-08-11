@@ -3,6 +3,7 @@
 from .checkpointing import (
     CheckpointState,
     load_checkpoint,
+    load_pretrained_backbone,
     save_checkpoint,
 )
 from .pretrainer import (
@@ -15,6 +16,7 @@ __all__ = [
     "CheckpointState",
     "save_checkpoint",
     "load_checkpoint",
+    "load_pretrained_backbone",
     "Trainer",
     "Pretrainer",
     "PretrainingWeights",
