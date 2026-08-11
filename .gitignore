@@ -1,16 +1,47 @@
+# Python
 __pycache__/
 *.py[cod]
+*.pyo
+*.pyd
+*.so
 *.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
 .venv/
+venv/
+env/
+
+# Environment files
 .env
+.env.*
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Experiment artifacts
 logs/*
 !logs/.gitkeep
+
 reports/*
 !reports/.gitkeep
+
 checkpoints/*
 !checkpoints/.gitkeep
+
 outputs/*
 !outputs/.gitkeep
+
+# Model/data artifacts
 *.pt
 *.pth
 *.ckpt
+
+# Temporary files
+*.tmp
+*.log
