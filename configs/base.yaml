@@ -30,7 +30,7 @@ model:
   history_steps: 10
   future_steps: 25
 
-  use_refiner: false
+  use_refiner: true
   refiner_radius_m: 8.0
 
 training:
