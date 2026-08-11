@@ -212,10 +212,8 @@ class Trainer:
             and
             self.amp_dtype == torch.float16
         ):
-            self.scaler = torch.amp.GradScaler(
-                "cuda"
-            )
-
+            self.scaler = torch.cu
+            da.amp.GradScaler()
         self.global_step = 0
 
     def _compute_loss(
