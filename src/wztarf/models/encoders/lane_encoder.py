@@ -307,6 +307,7 @@ class LaneEncoder(nn.Module):
         ego_context: torch.Tensor,
         wz_context: torch.Tensor,
         lane_attr: torch.Tensor | None = None,
+        compact: bool = True,
     ) -> dict[str, torch.Tensor]:
         """Encode lanes and return selected graph states."""
         if lane_feat.ndim != 4:
@@ -446,49 +447,114 @@ class LaneEncoder(nn.Module):
             ~valid_lane,
             -1e9,
         )
+        if not compact:
+            # Phase A pretraining keeps every valid represented lane.
+            active_mask = valid_lane.clone()
 
-        active_mask = torch.zeros_like(
-            valid_lane
-        )
-
-        # Top-k seed lanes followed by one-hop permanent graph expansion.
-        for b in range(
-            batch_size
-        ):
-            valid_indices = torch.nonzero(
-                valid_lane[b],
-                as_tuple=False,
-            ).flatten()
-
-            if valid_indices.numel() == 0:
-                continue
-
-            k = min(
-                self.top_seed_lanes,
-                int(
-                    valid_indices.numel()
-                ),
+        else:
+            active_mask = torch.zeros_like(
+                valid_lane
             )
 
-            local_scores = relevance_logit[
-                b,
-                valid_indices,
-            ]
+            # Supervised forecasting keeps Top-k seeds plus one-hop neighbors.
+            for b in range(
+                batch_size
+            ):
+                valid_indices = torch.nonzero(
+                    valid_lane[b],
+                    as_tuple=False,
+                ).flatten()
 
-            selected_local = torch.topk(
-                local_scores,
-                k=k,
-            ).indices
+                if valid_indices.numel() == 0:
+                    continue
 
-            seeds = valid_indices[
-                selected_local
-            ]
+                k = min(
+                    self.top_seed_lanes,
+                    int(
+                        valid_indices.numel()
+                    ),
+                )
 
-            active_mask[
-                b,
-                seeds,
-            ] = True
+                local_scores = relevance_logit[
+                    b,
+                    valid_indices,
+                ]
 
+                selected_local = torch.topk(
+                    local_scores,
+                    k=k,
+                ).indices
+
+                seeds = valid_indices[
+                    selected_local
+                ]
+
+                active_mask[
+                    b,
+                    seeds,
+                ] = True
+
+                valid_edges = torch.nonzero(
+                    lane_edge_mask[b].bool(),
+                    as_tuple=False,
+                ).flatten()
+
+                if valid_edges.numel() == 0:
+                    continue
+
+                src = lane_edge_index[
+                    b,
+                    0,
+                    valid_edges,
+                ].long()
+
+                dst = lane_edge_index[
+                    b,
+                    1,
+                    valid_edges,
+                ].long()
+
+                in_bounds = (
+                    (src >= 0)
+                    &
+                    (dst >= 0)
+                    &
+                    (src < num_lanes)
+                    &
+                    (dst < num_lanes)
+                )
+
+                src = src[
+                    in_bounds
+                ]
+
+                dst = dst[
+                    in_bounds
+                ]
+
+                for seed in seeds:
+                    connected = (
+                        (src == seed)
+                        |
+                        (dst == seed)
+                    )
+
+                    neighbors = torch.cat(
+                        (
+                            src[
+                                connected
+                            ],
+                            dst[
+                                connected
+                            ],
+                        )
+                    )
+
+                    active_mask[
+                        b,
+                        neighbors,
+                    ] = True
+ 
             valid_edges = torch.nonzero(
                 lane_edge_mask[b].bool(),
                 as_tuple=False,
@@ -629,6 +695,13 @@ class LaneEncoder(nn.Module):
         )
 
         return {
+            "lane_point_states": (
+                point_state
+                *
+                point_mask[..., None].to(
+                    point_state.dtype
+                )
+            ),
             "lane_states": lane_state,
             "lane_context": lane_context,
             "lane_relevance": pooled_weight,
