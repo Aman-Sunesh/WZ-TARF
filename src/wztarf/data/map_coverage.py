@@ -96,67 +96,6 @@ def build_map_coverage_mask(
     )
 
 
-def _point_to_polygon_edge_distance(
-    points: torch.Tensor,
-    polygon: torch.Tensor,
-) -> torch.Tensor:
-    """Return minimum point-to-polygon-edge distance for each point."""
-    start = polygon
-
-    end = torch.roll(
-        polygon,
-        shifts=-1,
-        dims=0,
-    )
-
-    segment = (
-        end
-        -
-        start
-    )
-
-    # [N, 1, 2] - [1, S, 2] -> [N, S, 2]
-    point_offset = (
-        points[:, None, :]
-        -
-        start[None, :, :]
-    )
-
-    segment_sq = (
-        segment.square().sum(dim=-1)
-        .clamp_min(1e-12)
-    )
-
-    projection = (
-        point_offset
-        *
-        segment[None, :, :]
-    ).sum(dim=-1)
-
-    projection = (
-        projection
-        /
-        segment_sq[None, :]
-    ).clamp(0.0, 1.0)
-
-    closest = (
-        start[None, :, :]
-        +
-        projection[..., None]
-        *
-        segment[None, :, :]
-    )
-
-    distance = torch.linalg.vector_norm(
-        points[:, None, :]
-        -
-        closest,
-        dim=-1,
-    )
-
-    return distance.min(dim=1).values
-
-
 def distance_to_lane_union(
     points: torch.Tensor,
     lane_feat: torch.Tensor,
