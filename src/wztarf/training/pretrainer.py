@@ -145,6 +145,7 @@ class Pretrainer:
         fac_temperature: float = 0.1,
         fac_exclusion_seconds: float = 5.0,
         fac_symmetric: bool = False,
+        fps: int = 5,
         scheduler_metric: str | None = None,
         mask_seed: int = 2023,
     ) -> None:
@@ -194,6 +195,9 @@ class Pretrainer:
         self.fac_temperature = fac_temperature
         self.fac_exclusion_seconds = fac_exclusion_seconds
         self.fac_symmetric = fac_symmetric
+        self.fps = int(
+            fps
+        )
         self.scheduler_metric = scheduler_metric
         self.mask_seed = int(
             mask_seed
@@ -215,6 +219,11 @@ class Pretrainer:
         if fac_exclusion_seconds < 0:
             raise ValueError(
                 "fac_exclusion_seconds cannot be negative."
+            )
+
+        if self.fps <= 0:
+            raise ValueError(
+                "fps must be positive."
             )
 
         self.use_amp = (
@@ -289,53 +298,7 @@ class Pretrainer:
         self,
         batch: Mapping[str, Any],
     ) -> tuple[list[Any], torch.Tensor]:
-        """Extract sequence IDs and anchor times for false-negative filtering.
-
-        The preferred batch-level fields are:
-
-            sequence_id
-            anchor_time_s
-
-        If they are absent, the same keys are searched inside the metadata
-        dictionaries preserved by the WorkZone collator.
-        """
-        if (
-            "sequence_id" in batch
-            and
-            "anchor_time_s" in batch
-        ):
-            sequence_id = batch[
-                "sequence_id"
-            ]
-
-            anchor_time = batch[
-                "anchor_time_s"
-            ]
-
-            if isinstance(
-                sequence_id,
-                torch.Tensor,
-            ):
-                sequence_ids = sequence_id.detach().cpu().tolist()
-            else:
-                sequence_ids = list(
-                    sequence_id
-                )
-
-            if not isinstance(
-                anchor_time,
-                torch.Tensor,
-            ):
-                anchor_time = torch.as_tensor(
-                    anchor_time,
-                    dtype=torch.float32,
-                    device=self.device,
-                )
-
-            return (
-                sequence_ids,
-                anchor_time,
-            )
+        """Extract drive identity and anchor time for overlap suppression."""
 
         metadata = batch.get(
             "meta"
@@ -346,12 +309,32 @@ class Pretrainer:
             list,
         ):
             raise KeyError(
-                "FAC pretraining requires sequence_id and anchor_time_s "
-                "either as batch fields or inside each metadata dictionary."
+                "Future-contrastive pretraining requires per-sample meta."
             )
 
-        sequence_ids = []
-        anchor_times = []
+        sequence_keys = (
+            "sequence_id",
+            "scene_id",
+            "scenario_id",
+            "drive_id",
+            "episode_id",
+            "scenario",
+        )
+
+        time_keys = (
+            "anchor_time_s",
+            "time_s",
+            "timestamp_s",
+        )
+
+        frame_keys = (
+            "anchor_frame",
+            "frame_idx",
+            "frame_index",
+        )
+
+        sequence_ids: list[Any] = []
+        anchor_times: list[float] = []
 
         for index, item in enumerate(
             metadata
@@ -361,29 +344,68 @@ class Pretrainer:
                 Mapping,
             ):
                 raise TypeError(
-                    f"meta[{index}] must be dictionary-like."
+                    f"meta[{index}] must be mapping-like."
                 )
 
-            if "sequence_id" not in item:
+            sequence = next(
+                (
+                    item[key]
+                    for key in sequence_keys
+                    if key in item
+                ),
+                None,
+            )
+
+            if sequence is None:
                 raise KeyError(
-                    f"meta[{index}] is missing 'sequence_id'."
+                    f"meta[{index}] contains no recognized sequence identifier."
                 )
 
-            if "anchor_time_s" not in item:
-                raise KeyError(
-                    f"meta[{index}] is missing 'anchor_time_s'."
+            time_s = next(
+                (
+                    float(
+                        item[key]
+                    )
+                    for key in time_keys
+                    if key in item
+                ),
+                None,
+            )
+
+            if time_s is None:
+                frame = next(
+                    (
+                        item[key]
+                        for key in frame_keys
+                        if key in item
+                    ),
+                    None,
+                )
+
+                if frame is None:
+                    raise KeyError(
+                        f"meta[{index}] contains no recognized anchor "
+                        "time or frame index."
+                    )
+
+                time_s = (
+                    float(
+                        frame
+                    )
+                    /
+                    float(
+                        self.fps
+                    )
                 )
 
             sequence_ids.append(
-                item["sequence_id"]
+                sequence
             )
 
             anchor_times.append(
-                float(
-                    item["anchor_time_s"]
-                )
+                time_s
             )
-
+    
         return (
             sequence_ids,
             torch.tensor(
