@@ -9,6 +9,10 @@ from .features import (
     future_time,
     relative_history_time,
 )
+from .targets import (
+    SupervisedTargets,
+    build_supervised_targets,
+)
 from .map_coverage import (
     GoalTarget,
     build_map_coverage_mask,
