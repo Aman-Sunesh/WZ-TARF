@@ -126,11 +126,11 @@ class AgentEncoder(nn.Module):
             device=x.device,
         )
 
-      projected_temporal = self.projection(
-          temporal
-      )
+        projected_temporal = self.projection(
+            temporal
+        )
 
-      last_state = projected_temporal[
+        last_state = projected_temporal[
             flat_index,
             last_index,
         ]
