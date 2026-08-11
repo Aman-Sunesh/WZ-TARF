@@ -13,6 +13,7 @@ from wztarf.data import (
     WorkZoneDataset,
     collate_workzone_batch,
 )
+from wztarf.data.dataset import validate_edge_type_capacity
 from wztarf.losses import LossWeights
 from wztarf.models import (
     WZTARF,
@@ -111,53 +112,6 @@ def _resolve_device(
         )
 
     return device
-
-def validate_edge_type_capacity(
-    dataset,
-    *,
-    num_edge_types: int,
-) -> None:
-    """Verify serialized edge IDs fit the model embedding table."""
-    maximum = -1
-
-    for index in range(
-        len(
-            dataset
-        )
-    ):
-        sample = dataset[
-            index
-        ]
-
-        mask = sample[
-            "lane_edge_mask"
-        ].bool()
-
-        if not bool(
-            mask.any()
-        ):
-            continue
-
-        local_max = int(
-            sample[
-                "lane_edge_type"
-            ][
-                mask
-            ].max().item()
-        )
-
-        maximum = max(
-            maximum,
-            local_max,
-        )
-
-    if maximum >= num_edge_types:
-        raise ValueError(
-            f"Dataset uses lane_edge_type={maximum}, but "
-            f"model.num_edge_types={num_edge_types}. "
-            f"Set num_edge_types to at least {maximum + 1}."
-        )
-
 
 def _build_scheduler(
     optimizer: torch.optim.Optimizer,
