@@ -245,3 +245,326 @@ def signed_distance_to_polygon(
         -distance,
         distance,
     )
+
+def points_on_polygon_boundary(
+    points: torch.Tensor,
+    polygon: torch.Tensor,
+    *,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """Return whether each point lies on any polygon edge."""
+    _validate_points_polygon(
+        points,
+        polygon,
+    )
+
+    edge_start = polygon
+    edge_end = torch.roll(
+        polygon,
+        shifts=-1,
+        dims=0,
+    )
+
+    edge = (
+        edge_end
+        -
+        edge_start
+    )
+
+    rel = (
+        points[:, None, :]
+        -
+        edge_start[None, :, :]
+    )
+
+    cross = (
+        edge[None, :, 0]
+        *
+        rel[..., 1]
+        -
+        edge[None, :, 1]
+        *
+        rel[..., 0]
+    ).abs()
+
+    edge_length = torch.linalg.vector_norm(
+        edge,
+        dim=-1,
+    )
+
+    tolerance = (
+        eps
+        *
+        (
+            1.0
+            +
+            edge_length
+        )
+    )[None]
+
+    collinear = (
+        cross
+        <=
+        tolerance
+    )
+
+    dot = (
+        rel
+        *
+        edge[None]
+    ).sum(
+        dim=-1
+    )
+
+    length_sq = (
+        edge
+        *
+        edge
+    ).sum(
+        dim=-1
+    )[None]
+
+    within = (
+        (dot >= -eps)
+        &
+        (dot <= length_sq + eps)
+    )
+
+    return (
+        collinear
+        &
+        within
+    ).any(
+        dim=1
+    )
+
+
+def segments_intersect_polygon(
+    start: torch.Tensor,
+    end: torch.Tensor,
+    polygon: torch.Tensor,
+    *,
+    eps: float = 1e-8,
+) -> bool:
+    """Return whether one line segment touches or crosses a polygon."""
+    if start.shape != (2,) or end.shape != (2,):
+        raise ValueError(
+            "start and end must have shape [2]."
+        )
+
+    if bool(
+        points_in_polygon(
+            torch.stack(
+                (
+                    start,
+                    end,
+                )
+            ),
+            polygon,
+        ).any()
+    ):
+        return True
+
+    def orientation(
+        a: torch.Tensor,
+        b: torch.Tensor,
+        c: torch.Tensor,
+    ) -> torch.Tensor:
+        return (
+            (b[0] - a[0])
+            *
+            (c[1] - a[1])
+            -
+            (b[1] - a[1])
+            *
+            (c[0] - a[0])
+        )
+
+    def on_segment(
+        a: torch.Tensor,
+        b: torch.Tensor,
+        p: torch.Tensor,
+    ) -> bool:
+        cross = orientation(
+            a,
+            b,
+            p,
+        )
+
+        if abs(
+            float(
+                cross.item()
+            )
+        ) > eps:
+            return False
+
+        return (
+            float(
+                torch.minimum(
+                    a[0],
+                    b[0],
+                ).item()
+            )
+            -
+            eps
+            <=
+            float(
+                p[0].item()
+            )
+            <=
+            float(
+                torch.maximum(
+                    a[0],
+                    b[0],
+                ).item()
+            )
+            +
+            eps
+            and
+            float(
+                torch.minimum(
+                    a[1],
+                    b[1],
+                ).item()
+            )
+            -
+            eps
+            <=
+            float(
+                p[1].item()
+            )
+            <=
+            float(
+                torch.maximum(
+                    a[1],
+                    b[1],
+                ).item()
+            )
+            +
+            eps
+        )
+
+    for index in range(
+        polygon.shape[0]
+    ):
+        a = polygon[index]
+        b = polygon[
+            (index + 1)
+            %
+            polygon.shape[0]
+        ]
+
+        o1 = orientation(
+            start,
+            end,
+            a,
+        )
+
+        o2 = orientation(
+            start,
+            end,
+            b,
+        )
+
+        o3 = orientation(
+            a,
+            b,
+            start,
+        )
+
+        o4 = orientation(
+            a,
+            b,
+            end,
+        )
+
+        proper = (
+            (
+                float(o1.item())
+                *
+                float(o2.item())
+            )
+            <
+            0
+            and
+            (
+                float(o3.item())
+                *
+                float(o4.item())
+            )
+            <
+            0
+        )
+
+        if proper:
+            return True
+
+        if (
+            on_segment(
+                start,
+                end,
+                a,
+            )
+            or
+            on_segment(
+                start,
+                end,
+                b,
+            )
+            or
+            on_segment(
+                a,
+                b,
+                start,
+            )
+            or
+            on_segment(
+                a,
+                b,
+                end,
+            )
+        ):
+            return True
+
+    return False
+
+
+def polygons_intersect(
+    polygon_a: torch.Tensor,
+    polygon_b: torch.Tensor,
+) -> bool:
+    """Return whether two polygons touch or overlap."""
+    if bool(
+        points_in_polygon(
+            polygon_a,
+            polygon_b,
+        ).any()
+    ):
+        return True
+
+    if bool(
+        points_in_polygon(
+            polygon_b,
+            polygon_a,
+        ).any()
+    ):
+        return True
+
+    for index in range(
+        polygon_a.shape[0]
+    ):
+        start = polygon_a[index]
+        end = polygon_a[
+            (index + 1)
+            %
+            polygon_a.shape[0]
+        ]
+
+        if segments_intersect_polygon(
+            start,
+            end,
+            polygon_b,
+        ):
+            return True
+
+    return False
