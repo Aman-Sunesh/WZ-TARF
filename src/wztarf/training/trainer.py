@@ -256,8 +256,13 @@ class Trainer:
         )
 
         num_batches = 0
+        epoch_start = time.perf_counter()
+        total_batches = len(dataloader)
 
-        for batch in dataloader:
+        for batch_index, batch in enumerate(
+            dataloader,
+            start=1,
+        ):
             batch = _move_to_device(
                 batch,
                 self.device,
@@ -334,6 +339,27 @@ class Trainer:
                 loss.detach().item()
             )
 
+            if (
+                batch_index == 1
+                or batch_index % 50 == 0
+                or batch_index == total_batches
+            ):
+                elapsed = time.perf_counter() - epoch_start
+                rate = batch_index / max(elapsed, 1e-8)
+                remaining = (
+                    total_batches - batch_index
+                ) / max(rate, 1e-8)
+
+                print(
+                    f"[Phase B][TRAIN] "
+                    f"Epoch {epoch} | "
+                    f"{batch_index}/{total_batches} | "
+                    f"loss={loss.detach().item():.4f} | "
+                    f"{rate:.2f} batch/s | "
+                    f"ETA={remaining / 60.0:.1f} min",
+                    flush=True,
+                )
+
             for name, value in loss_output.components.items():
                 running[
                     f"loss_{name}"
@@ -377,8 +403,13 @@ class Trainer:
         worker_batches: list[torch.Tensor] = []
 
         num_batches = 0
+        validation_start = time.perf_counter()
+        total_batches = len(dataloader)
 
-        for batch in dataloader:
+        for batch_index, batch in enumerate(
+            dataloader,
+            start=1,
+        ):
             batch = _move_to_device(
                 batch,
                 self.device,
@@ -447,6 +478,26 @@ class Trainer:
                 )
 
             num_batches += 1
+
+            if (
+                batch_index == 1
+                or batch_index % 50 == 0
+                or batch_index == total_batches
+            ):
+                elapsed = time.perf_counter() - validation_start
+                rate = batch_index / max(elapsed, 1e-8)
+                remaining = (
+                    total_batches - batch_index
+                ) / max(rate, 1e-8)
+
+                print(
+                    f"[Phase B][VAL] "
+                    f"{batch_index}/{total_batches} | "
+                    f"loss={loss_output.total.detach().item():.4f} | "
+                    f"{rate:.2f} batch/s | "
+                    f"ETA={remaining / 60.0:.1f} min",
+                    flush=True,
+                )
 
         if num_batches == 0:
             raise ValueError(
