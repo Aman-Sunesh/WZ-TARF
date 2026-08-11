@@ -141,7 +141,7 @@ class Pretrainer:
         config: Mapping[str, Any] | None = None,
         grad_clip_norm: float | None = 5.0,
         use_amp: bool = True,
-        amp_dtype: torch.dtype = torch.float16,
+        amp_dtype: torch.dtype = torch.bfloat16,
         fac_temperature: float = 0.1,
         fac_exclusion_seconds: float = 5.0,
         fac_symmetric: bool = False,
