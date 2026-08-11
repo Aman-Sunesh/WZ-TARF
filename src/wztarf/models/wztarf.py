@@ -386,6 +386,9 @@ class WZTARF(nn.Module):
     def encode_scene(
         self,
         batch: Mapping[str, Any],
+        *,
+        mask_plan: Any | None = None,
+        compact_lanes: bool = True,
     ) -> dict[str, torch.Tensor]:
         """Encode all observed scene modalities before route decoding."""
         motion_features = build_motion_features(
@@ -405,13 +408,134 @@ class WZTARF(nn.Module):
             fps=self.config.fps,
         )
 
+        control_mask = batch[
+            "control_mask"
+        ].bool()
+
+        gaze_mask = batch[
+            "gaze_mask"
+        ].bool()
+
+        agent_mask = batch[
+            "agent_mask"
+        ].bool()
+
+        lane_point_mask = batch[
+            "lane_point_mask"
+        ].bool()
+
+        lane_feat = batch[
+            "lane_feat"
+        ]
+
+        wz_feat = batch[
+            "wz_feat"
+        ]
+
+        worker_feat = batch[
+            "wz_worker_feat"
+        ]
+
+        agent_features = self._agent_features(
+            batch[
+                "agent_hist"
+            ]
+        )
+
+        if mask_plan is not None:
+            motion_features = motion_features.masked_fill(
+                mask_plan.motion[
+                    ...,
+                    None,
+                ],
+                0.0,
+            )
+
++            control_features = control_features.masked_fill(
++                mask_plan.controls[
++                    ...,
++                    None,
++                ],
++                0.0,
++            )
++
++            control_mask = (
++                control_mask
++                &
++                ~mask_plan.controls
++            )
++
++            gaze_features = gaze_features.masked_fill(
++                mask_plan.gaze[
++                    ...,
++                    None,
++                ],
++                0.0,
++            )
++
++            gaze_mask = (
++                gaze_mask
++                &
++                ~mask_plan.gaze
++            )
++
++            agent_mask = (
++                agent_mask
++                &
++                ~mask_plan.agents
+            )
+
+            lane_point_mask = (
+                lane_point_mask
+                &
+                ~mask_plan.lanes
+            )
+
+            wz_feat = wz_feat.clone()
+
+            wz_feat[
+                ...,
+                2,
+            ] = torch.where(
+                mask_plan.workzone,
+                torch.zeros_like(
+                    wz_feat[
+                        ...,
+                        2,
+                    ]
+                ),
+                wz_feat[
+                    ...,
+                    2,
+                ],
+            )
+
+            worker_feat = worker_feat.clone()
+
+            worker_feat[
+                ...,
+                2,
+            ] = torch.where(
+                mask_plan.workers,
+                torch.zeros_like(
+                    worker_feat[
+                        ...,
+                        2,
+                    ]
+                ),
+                worker_feat[
+                    ...,
+                    2,
+                ],
+            )
+
         motion_states, _ = self.motion_encoder(
             motion_features
         )
 
         control_states, control_context = self.control_encoder(
             control_features,
-            batch["control_mask"],
+            control_mask,
         )
 
         gate_features = self._control_gate_features(
@@ -422,40 +546,34 @@ class WZTARF(nn.Module):
         ego_states, ego_context, control_gate = self.control_fusion(
             motion_states,
             control_states,
-            batch["control_mask"],
+            ontrol_mask,
             gate_features,
         )
 
         gaze = self.gaze_encoder(
             gaze_features,
-            batch["gaze_mask"],
+            gaze_mask,
         )
 
         agent = self.agent_encoder(
-            self._agent_features(
-                batch["agent_hist"]
-            ),
-            batch["agent_mask"],
+            agent_features,
+            agent_mask,
             ego_context,
         )
 
-        ego_speed = batch[
-            "ego_hist"
-        ][
+        workzone = self.workzone_encoder(
+        wz_feat,
+        worker_feat,
+        ego_speed=motion_features[
             :,
             -1,
-            5,
-        ]
-
-        workzone = self.workzone_encoder(
-            batch["wz_feat"],
-            batch["wz_worker_feat"],
-            ego_speed=ego_speed,
+            9,
+        ],
         )
 
         lane = self.lane_encoder(
-            batch["lane_feat"],
-            batch["lane_point_mask"],
+        lane_feat,
+        lane_point_mask,
             batch["lane_mask"],
             batch["lane_edge_index"],
             batch["lane_edge_type"],
@@ -465,6 +583,7 @@ class WZTARF(nn.Module):
             lane_attr=batch.get(
                 "lane_attr"
             ),
+            compact=compact_lanes,
         )
 
         topology = self.topology_adapter(
@@ -514,10 +633,13 @@ class WZTARF(nn.Module):
             "control_features": control_features,
             "ego_states": ego_states,
             "ego_context": ego_context,
+            "control_states": control_states,
             "control_context": control_context,
             "control_gate": control_gate,
+            "gaze_states": gaze["gaze_states"],
             "gaze_context": gaze["gaze_context"],
             "gaze_reliability": gaze["gaze_reliability"],
+            "agent_temporal_states": agent["agent_temporal_states"],
             "agent_states": agent["agent_states"],
             "agent_context": agent["agent_context"],
             "agent_mask": agent["agent_mask"],
@@ -526,6 +648,7 @@ class WZTARF(nn.Module):
             "wz_token_mask": workzone["wz_token_mask"],
             "wz_token_xy": workzone["wz_token_xy"],
             "wz_context": workzone["wz_context"],
+            "lane_point_states": lane["lane_point_states"],
             "lane_states": topology["lane_states"],
             "lane_context": topology["lane_context"],
             "lane_mask": lane["lane_mask"],
