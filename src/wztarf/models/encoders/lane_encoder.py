@@ -751,31 +751,26 @@ class LaneEncoder(nn.Module):
         ).sum(
             dim=1
         )
-
-        # Mean valid center position for local refinement.
-        center = lane_feat[
-            ...,
-            :2,
-        ]
-
-        center_mask = point_mask.to(
-            center.dtype
+            
+        route_point_mask = (
+            point_mask
+            &
+            active_mask[
+                :,
+                :,
+                None,
+            ]
         )
-
-        lane_xy = (
+    
+        lane_centerline = (
             center
             *
-            center_mask[..., None]
-        ).sum(
-            dim=2
-        ) / (
-            center_mask.sum(
-                dim=2,
-                keepdim=True,
+            route_point_mask[
+                ...,
+                None,
+            ].to(
+                center.dtype
             )
-            +
-            1e-8
-        )
 
         return {
             "lane_point_states": (
@@ -791,4 +786,6 @@ class LaneEncoder(nn.Module):
             "lane_mask": active_mask,
             "lane_xy": lane_xy,
             "lane_heading": lane_heading,
+            "lane_centerline": lane_centerline,
+            "lane_point_mask": route_point_mask,
         }
