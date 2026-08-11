@@ -188,7 +188,9 @@ class AgentEncoder(nn.Module):
 
         relevance_logits = relevance_logits.masked_fill(
             ~agent_present,
-            -1e9,
+            torch.finfo(
+                relevance_logits.dtype
+            ).min,
         )
 
         weights = torch.softmax(
