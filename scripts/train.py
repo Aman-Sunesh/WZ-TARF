@@ -19,7 +19,10 @@ from wztarf.models import (
     WZTARFConfig,
 )
 from wztarf.reporting import RunLogger
-from wztarf.training import Trainer
+from wztarf.training import (
+    Trainer,
+    load_pretrained_backbone,
+)
 from wztarf.utils import (
     load_yaml,
     make_generator,
@@ -36,8 +39,6 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Train WZ-TARF."
     )
-
-    parser.add_argument(
         "--config",
         type=Path,
         default=PROJECT_ROOT / "configs" / "base.yaml",
@@ -66,6 +67,13 @@ def _parse_args() -> argparse.Namespace:
         "--resume",
         type=Path,
         default=None,
+    )
+
+    parser.add_argument(
+        "--pretrained",
+        type=Path,
+        default=None,
+        help="Phase A checkpoint used to initialize the forecasting backbone.",
     )
 
     parser.add_argument(
@@ -261,6 +269,22 @@ def main() -> None:
             **config["model"]
         )
     )
+
+    if (
+        args.resume is not None
+        and args.pretrained is not None
+    ):
+        raise ValueError(
+            "--resume and --pretrained cannot be used together."
+        )
+
+    if args.pretrained is not None:
+        load_pretrained_backbone(
+            args.pretrained,
+            model=model,
+            map_location="cpu",
+            strict=True,
+        )
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
