@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 from dataclasses import dataclass
+
 import torch
+
+from wztarf.geometry.lanes import lane_bounds, reconstruct_lane_polygons,
 from wztarf.geometry.workzone import points_in_polygon
 
 
@@ -26,169 +29,6 @@ class GoalTarget:
     class_index: int
     valid: bool
     is_map_exit: bool
-
-
-def lane_polygons_from_features(
-    lane_feat: torch.Tensor,
-    lane_point_mask: torch.Tensor,
-    lane_mask: torch.Tensor,
-) -> list[torch.Tensor]:
-    """Reconstruct lane polygons from the final 8-D lane representation.
-
-    Expected lane feature layout:
-
-        lane_feat[L, P, 8]
-
-    Geometry uses:
-
-        center = lane_feat[..., 0:2]
-        left   = center + lane_feat[..., 4:6]
-        right  = center + lane_feat[..., 6:8]
-
-    Each polygon is constructed as:
-
-        left boundary forward
-        +
-        right boundary reversed
-
-    Invalid lanes and lanes with fewer than two valid points are skipped.
-    """
-    if lane_feat.ndim != 3:
-        raise ValueError(
-            "lane_feat must have shape [L, P, F]."
-        )
-
-    if lane_feat.shape[-1] < 8:
-        raise ValueError(
-            "lane_feat must contain at least 8 features."
-        )
-
-    if lane_point_mask.shape != lane_feat.shape[:2]:
-        raise ValueError(
-            "lane_point_mask must have shape [L, P]."
-        )
-
-    if lane_mask.shape != lane_feat.shape[:1]:
-        raise ValueError(
-            "lane_mask must have shape [L]."
-        )
-
-    polygons: list[torch.Tensor] = []
-
-    for lane_index in range(lane_feat.shape[0]):
-        if not bool(lane_mask[lane_index]):
-            continue
-
-        valid_points = lane_point_mask[lane_index].bool()
-
-        if int(valid_points.sum()) < 2:
-            continue
-
-        lane = lane_feat[lane_index, valid_points]
-
-        center = lane[:, 0:2]
-
-        left = (
-            center
-            +
-            lane[:, 4:6]
-        )
-
-        right = (
-            center
-            +
-            lane[:, 6:8]
-        )
-
-        polygon = torch.cat(
-            (
-                left,
-                torch.flip(right, dims=(0,)),
-            ),
-            dim=0,
-        )
-
-        polygons.append(polygon)
-
-    return polygons
-
-
-def _lane_support_points(
-    lane_feat: torch.Tensor,
-    lane_point_mask: torch.Tensor,
-    lane_mask: torch.Tensor,
-) -> torch.Tensor:
-    """Return all valid center, left-boundary, and right-boundary points."""
-    points: list[torch.Tensor] = []
-
-    for lane_index in range(lane_feat.shape[0]):
-        if not bool(lane_mask[lane_index]):
-            continue
-
-        valid_points = lane_point_mask[lane_index].bool()
-
-        if not bool(valid_points.any()):
-            continue
-
-        lane = lane_feat[lane_index, valid_points]
-
-        center = lane[:, 0:2]
-        left = center + lane[:, 4:6]
-        right = center + lane[:, 6:8]
-
-        points.extend(
-            (
-                center,
-                left,
-                right,
-            )
-        )
-
-    if not points:
-        raise ValueError(
-            "Cannot determine map support because no valid lane points exist."
-        )
-
-    return torch.cat(points, dim=0)
-
-
-def map_bounds_from_lane_features(
-    lane_feat: torch.Tensor,
-    lane_point_mask: torch.Tensor,
-    lane_mask: torch.Tensor,
-    margin_m: float = 0.0,
-) -> torch.Tensor:
-    """Return the local-map bounding box `[xmin, ymin, xmax, ymax]`.
-
-    The bounding box is a coarse coverage indicator. It is not treated as
-    drivable-area geometry.
-    """
-    if margin_m < 0:
-        raise ValueError("margin_m cannot be negative.")
-
-    points = _lane_support_points(
-        lane_feat,
-        lane_point_mask,
-        lane_mask,
-    )
-
-    minimum = points.amin(dim=0)
-    maximum = points.amax(dim=0)
-
-    margin = torch.tensor(
-        margin_m,
-        dtype=points.dtype,
-        device=points.device,
-    )
-
-    return torch.stack(
-        (
-            minimum[0] - margin,
-            minimum[1] - margin,
-            maximum[0] + margin,
-            maximum[1] + margin,
-        )
-    )
 
 
 def build_map_coverage_mask(
@@ -228,7 +68,7 @@ def build_map_coverage_mask(
             "future_xy must have shape [T, 2]."
         )
 
-    bounds = map_bounds_from_lane_features(
+    bounds = lane_bounds(
         lane_feat,
         lane_point_mask,
         lane_mask,
@@ -338,7 +178,7 @@ def distance_to_lane_union(
             "points must have shape [N, 2]."
         )
 
-    polygons = lane_polygons_from_features(
+    polygons = reconstruct_lane_polygons(
         lane_feat,
         lane_point_mask,
         lane_mask,
