@@ -115,6 +115,8 @@ class Trainer:
         diversity_separation_m: float = 1.0,
         goal_association_tolerance_m: float = 0.25,
         road_gt_tolerance_m: float = 0.25,
+        goal_association_tolerance_m: float = 0.25,
+        road_gt_tolerance_m: float = 0.25,
         grad_clip_norm: float | None = 5.0,
         use_amp: bool = True,
         amp_dtype: torch.dtype = torch.float16,
@@ -166,6 +168,12 @@ class Trainer:
         self.wz_temperature_m = wz_temperature_m
         self.road_tolerance_m = road_tolerance_m
         self.diversity_separation_m = diversity_separation_m
+        self.goal_association_tolerance_m = (
+            goal_association_tolerance_m
+        )
+        self.road_gt_tolerance_m = (
+            road_gt_tolerance_m
+        )
 
         self.goal_association_tolerance_m = (
             goal_association_tolerance_m
