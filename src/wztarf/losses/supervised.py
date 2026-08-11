@@ -183,15 +183,7 @@ def supervised_loss(
         future_xy:
             `[B, T, 2]`
 
-    Auxiliary training targets are required only for relevant enabled losses:
-
-        goal_target
-        goal_valid
-        goal_offset_target
-        lane_goal_mask
-        road_reliability_mask
-
-    Raw scene tensors used directly by safety/road losses:
+    Raw scene tensors used to construct map-aware targets and safety losses:
 
         lane_feat
         lane_point_mask
@@ -233,6 +225,46 @@ def supervised_loss(
         .argmin(dim=1)
     )
 
+    generated_targets = None
+
+    need_map_targets = (
+        weights.lane > 0
+        or weights.road > 0
+        or (
+            weights.route > 0
+            and "goal_offset" in model_output
+        )
+    )
+
+    if need_map_targets:
+        retained_lane_mask = _require(
+            model_output,
+            "lane_mask",
+            owner="model_output",
+        )
+
+        generated_targets = build_supervised_targets(
+            gt_xy=gt_xy,
+            lane_feat=_require(
+                batch,
+                "lane_feat",
+                owner="batch",
+            ),
+            lane_point_mask=_require(
+                batch,
+                "lane_point_mask",
+                owner="batch",
+            ),
+            lane_mask=_require(
+                batch,
+                "lane_mask",
+                owner="batch",
+            ),
+            retained_lane_mask=retained_lane_mask,
+            association_tolerance_m=goal_association_tolerance_m,
+            road_gt_tolerance_m=road_gt_tolerance_m,
+        )
+
     components: dict[str, torch.Tensor] = {}
 
     # --------------------------------------------------------------
@@ -273,22 +305,16 @@ def supervised_loss(
     # --------------------------------------------------------------
 
     if weights.lane > 0:
+        assert generated_targets is not None
+        
         components["lane"] = lane_goal_loss(
             goal_logits=_require(
                 model_output,
                 "goal_logits",
                 owner="model_output",
             ),
-            goal_target=_require(
-                batch,
-                "goal_target",
-                owner="batch",
-            ),
-            goal_valid=_require(
-                batch,
-                "goal_valid",
-                owner="batch",
-            ),
+            goal_target=generated_targets.goal_target,
+            goal_valid=generated_targets.goal_valid,
             winner_idx=winner_idx,
         )
 
@@ -308,22 +334,17 @@ def supervised_loss(
             fps=fps,
         )
 
-        has_offset = (
-            "goal_offset" in model_output
-            and
-            "goal_offset_target" in batch
-            and
-            "lane_goal_mask" in batch
-        )
-
-        if has_offset:
+    if (
+        "goal_offset" in model_output
+        and generated_targets is not None
+    ):
             components["route"] = route_loss(
                 route_anchors,
                 anchor_target,
                 winner_idx,
                 goal_offset_pred=model_output["goal_offset"],
-                goal_offset_target=batch["goal_offset_target"],
-                lane_goal_mask=batch["lane_goal_mask"],
+            goal_offset_target=generated_targets.goal_offset_target,
+            lane_goal_mask=generated_targets.lane_goal_mask,
             )
 
         else:
@@ -378,28 +399,14 @@ def supervised_loss(
     # --------------------------------------------------------------
 
     if weights.road > 0:
+        assert generated_targets is not None
+        
         components["road"] = road_compliance_loss(
             pred_xy=pred_xy,
-            road_reliability_mask=_require(
-                batch,
-                "road_reliability_mask",
-                owner="batch",
-            ),
-            lane_feat=_require(
-                batch,
-                "lane_feat",
-                owner="batch",
-            ),
-            lane_point_mask=_require(
-                batch,
-                "lane_point_mask",
-                owner="batch",
-            ),
-            lane_mask=_require(
-                batch,
-                "lane_mask",
-                owner="batch",
-            ),
+            road_reliability_mask=generated_targets.road_reliability_mask,
+            lane_feat=batch["lane_feat"],
+            lane_point_mask=batch["lane_point_mask"],
+            lane_mask=batch["lane_mask"],
             epsilon_pred_m=road_tolerance_m,
         )
 
