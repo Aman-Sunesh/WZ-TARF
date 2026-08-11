@@ -360,7 +360,9 @@ class LaneEncoder(nn.Module):
 
         attention_logit = attention_logit.masked_fill(
             ~point_mask,
-            -1e9,
+            torch.finfo(
+                attention_logit.dtype
+            ).min,
         )
 
         attention = torch.softmax(
@@ -586,7 +588,9 @@ class LaneEncoder(nn.Module):
 
         relevance_logit = relevance_logit.masked_fill(
             ~valid_lane,
-            -1e9,
+            torch.finfo(
+                attention_logit.dtype
+            ).min,
         )
         if not compact:
             # Phase A pretraining keeps every valid represented lane.
@@ -719,7 +723,9 @@ class LaneEncoder(nn.Module):
 
         pooled_score = relevance_logit.masked_fill(
             ~active_mask,
-            -1e9,
+            torch.finfo(
+                attention_logit.dtype
+            ).min,
         )
 
         pooled_weight = torch.softmax(
