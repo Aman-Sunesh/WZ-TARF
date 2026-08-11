@@ -1281,7 +1281,9 @@ class WorkZoneEncoder(nn.Module):
 
         score = score.masked_fill(
             ~safe_mask,
-            -1e9,
+            torch.finfo(
+                score.dtype
+            ).min,
         )
 
         weight = torch.softmax(
