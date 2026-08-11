@@ -325,6 +325,7 @@ class Pretrainer:
             "anchor_time_s",
             "time_s",
             "timestamp_s",
+            "t_anchor",
         )
 
         frame_keys = (
