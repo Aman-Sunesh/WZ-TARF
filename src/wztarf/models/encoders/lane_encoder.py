@@ -7,6 +7,7 @@ import math
 import torch
 from torch import nn
 
+from wztarf.geometry.lanes import lane_edge_relation_features
 
 class _LaneGraphLayer(nn.Module):
     """One typed permanent-lane graph message-passing layer."""
@@ -23,9 +24,21 @@ class _LaneGraphLayer(nn.Module):
             d_model,
         )
 
+        self.relation_encoder = nn.Sequential(
+            nn.Linear(
+                7,
+                d_model,
+            ),
+            nn.ReLU(),
+            nn.Linear(
+                d_model,
+                d_model,
+            ),
+        )
+
         self.message = nn.Sequential(
             nn.Linear(
-                2 * d_model,
+                3 * d_model,
                 d_model,
             ),
             nn.ReLU(),
@@ -55,6 +68,8 @@ class _LaneGraphLayer(nn.Module):
         self,
         nodes: torch.Tensor,
         node_mask: torch.Tensor,
+        lane_xy: torch.Tensor,
+        lane_heading: torch.Tensor,
         edge_index: torch.Tensor,
         edge_type: torch.Tensor,
         edge_mask: torch.Tensor,
@@ -149,11 +164,23 @@ class _LaneGraphLayer(nn.Module):
                         etype
                     )
 
+                    relation = lane_edge_relation_features(
+                        lane_xy[b],
+                        lane_heading[b],
+                        src,
+                        dst,
+                    )
+                    
+                    relation_feature = self.relation_encoder(
+                        relation
+                    )
+                    
                     message = self.message(
                         torch.cat(
                             (
                                 h[src],
                                 edge_feature,
+                                relation_feature,
                             ),
                             dim=-1,
                         )
@@ -420,6 +447,120 @@ class LaneEncoder(nn.Module):
             has_point
         )
 
+
+
+        # ------------------------------------------------------------------
+        # Representative lane position and heading used by explicit
+        # geometric lane-edge relations.
+        # ------------------------------------------------------------------
+        
+        center = lane_feat[
+            ...,
+            :2,
+        ]
+        
+        center_mask = point_mask.to(
+            center.dtype
+        )
+        
+        lane_xy = (
+            center
+            *
+            center_mask[..., None]
+        ).sum(
+            dim=2
+        ) / (
+            center_mask.sum(
+                dim=2,
+                keepdim=True,
+            )
+            +
+            1e-8
+        )
+        
+        segment = (
+            center[:, :, 1:]
+            -
+            center[:, :, :-1]
+        )
+        
+        segment_mask = (
+            point_mask[:, :, 1:]
+            &
+            point_mask[:, :, :-1]
+        )
+        
+        segment_length = torch.linalg.vector_norm(
+            segment,
+            dim=-1,
+        )
+        
+        segment_direction = (
+            segment
+            /
+            segment_length[
+                ...,
+                None,
+            ].clamp_min(
+                1e-8
+            )
+        )
+        
+        heading_sum = (
+            segment_direction
+            *
+            segment_mask[
+                ...,
+                None,
+            ].to(
+                segment_direction.dtype
+            )
+        ).sum(
+            dim=2
+        )
+        
+        heading_norm = torch.linalg.vector_norm(
+            heading_sum,
+            dim=-1,
+            keepdim=True,
+        )
+        
+        lane_heading = (
+            heading_sum
+            /
+            heading_norm.clamp_min(
+                1e-8
+            )
+        )
+        
+        default_heading = torch.zeros_like(
+            lane_heading
+        )
+        
+        default_heading[
+            ...,
+            0,
+        ] = 1.0
+        
+        lane_heading = torch.where(
+            heading_norm > 1e-6,
+            lane_heading,
+            default_heading,
+        )
+        
+        lane_heading = (
+            lane_heading
+            *
+            valid_lane[
+                ...,
+                None,
+            ].to(
+                lane_heading.dtype
+            )
+        )
+
+        
+        
         ego = ego_context[:, None].expand(
             -1,
             num_lanes,
@@ -569,6 +710,8 @@ class LaneEncoder(nn.Module):
             lane_state = graph_layer(
                 lane_state,
                 active_mask,
+                lane_xy,
+                lane_heading,
                 lane_edge_index,
                 lane_edge_type,
                 lane_edge_mask,
@@ -647,4 +790,5 @@ class LaneEncoder(nn.Module):
             "lane_relevance": pooled_weight,
             "lane_mask": active_mask,
             "lane_xy": lane_xy,
+            "lane_heading": lane_heading,
         }
