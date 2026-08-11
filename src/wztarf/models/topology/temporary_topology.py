@@ -311,7 +311,9 @@ class TemporaryTopologyAdapter(nn.Module):
             edge_gate[
                 b,
                 valid_edges,
-            ] = gate
+            ] = gate.to(
+                dtype=edge_gate.dtype
+            )
 
         for message_layer, update_layer, norm in zip(
             self.message_layers,
@@ -436,6 +438,13 @@ class TemporaryTopologyAdapter(nn.Module):
                             gate[:, None]
                         )
 
+                        # AMP can produce FP16 messages while the graph
+                        # accumulation buffer remains FP32. index_add_ requires
+                        # source and destination to have identical dtypes.
+                        message = message.to(
+                            dtype=aggregate.dtype
+                        )
+
                         aggregate.index_add_(
                             0,
                             dst,
@@ -496,7 +505,9 @@ class TemporaryTopologyAdapter(nn.Module):
 
         pooling_score = node_viability.masked_fill(
             ~lane_mask.bool(),
-            -1e9,
+            torch.finfo(
+                node_viability.dtype
+            ).min,
         )
 
         pooling_weight = torch.softmax(
