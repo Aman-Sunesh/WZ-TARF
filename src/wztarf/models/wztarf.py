@@ -673,6 +673,7 @@ class WZTARF(nn.Module):
             "pred_xy": pred_xy,
             "mode_logits": mode_logits,
             "mode_prob": mode_prob,
+            "lane_mask": scene["lane_mask"],
 
             "coarse_xy": coarse_xy,
             "dynamics_xy": dynamics_xy,
