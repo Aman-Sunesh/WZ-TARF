@@ -1,1 +1,16 @@
-
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.env
+logs/*
+!logs/.gitkeep
+reports/*
+!reports/.gitkeep
+checkpoints/*
+!checkpoints/.gitkeep
+outputs/*
+!outputs/.gitkeep
+*.pt
+*.pth
+*.ckpt
