@@ -186,6 +186,13 @@ class _LaneGraphLayer(nn.Module):
                         )
                     )
 
+                    # AMP may produce FP16 messages while the graph state and
+                    # accumulation buffer remain FP32. Accumulate in the graph
+                    # state's dtype for numerical stability.
+                    message = message.to(
+                        dtype=aggregate.dtype
+                    )
+
                     aggregate.index_add_(
                         0,
                         dst,
