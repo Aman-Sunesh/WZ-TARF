@@ -569,20 +569,20 @@ class Pretrainer:
             components[
                 "topology"
             ] = topology_reconstruction_loss(
-            lane_overlap_pred=output[
-                "lane_overlap_pred"
-            ],
-            lane_overlap_target=targets.lane_overlap,
-            lane_distance_pred=output[
-                "lane_distance_pred"
-            ],
-            lane_distance_target=targets.lane_distance,
-            lane_mask=valid_lane,
-            edge_compat_logits=output[
-                "edge_compat_logits"
-            ],
-            edge_compat_target=targets.edge_compatibility,
-            edge_mask=valid_edge,
+                lane_overlap_pred=output[
+                    "lane_overlap_pred"
+                ],
+                lane_overlap_target=targets.lane_overlap,
+                lane_distance_pred=output[
+                    "lane_distance_pred"
+                ],
+                lane_distance_target=targets.lane_distance,
+                lane_mask=valid_lane,
+                edge_compat_logits=output[
+                    "edge_compat_logits"
+                ],
+                edge_compat_target=targets.edge_compatibility,
+                edge_mask=valid_edge,
             )
 
             total = (
