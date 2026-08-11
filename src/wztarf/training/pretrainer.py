@@ -569,46 +569,20 @@ class Pretrainer:
             components[
                 "topology"
             ] = topology_reconstruction_loss(
-                lane_overlap_pred=_require(
-                    output,
-                    "lane_overlap_pred",
-                    owner="pretraining output",
-                ),
-                lane_overlap_target=_require(
-                    batch,
-                    "lane_overlap_target",
-                    owner="batch",
-                ),
-                lane_distance_pred=_require(
-                    output,
-                    "lane_distance_pred",
-                    owner="pretraining output",
-                ),
-                lane_distance_target=_require(
-                    batch,
-                    "lane_distance_target",
-                    owner="batch",
-                ),
-                lane_mask=_require(
-                    batch,
-                    "lane_mask",
-                    owner="batch",
-                ),
-                edge_compat_logits=_require(
-                    output,
-                    "edge_compat_logits",
-                    owner="pretraining output",
-                ),
-                edge_compat_target=_require(
-                    batch,
-                    "edge_compat_target",
-                    owner="batch",
-                ),
-                edge_mask=_require(
-                    batch,
-                    "lane_edge_mask",
-                    owner="batch",
-                ),
+            lane_overlap_pred=output[
+                "lane_overlap_pred"
+            ],
+            lane_overlap_target=targets.lane_overlap,
+            lane_distance_pred=output[
+                "lane_distance_pred"
+            ],
+            lane_distance_target=targets.lane_distance,
+            lane_mask=valid_lane,
+            edge_compat_logits=output[
+                "edge_compat_logits"
+            ],
+            edge_compat_target=targets.edge_compatibility,
+            edge_mask=valid_edge,
             )
 
             total = (
@@ -910,6 +884,16 @@ class Pretrainer:
                 best_epoch = epoch
                 bad_epochs = 0
 
+            else:
+                bad_epochs += 1
+    
+            # Advance the scheduler before checkpointing so every checkpoint
+            # contains the complete optimizer state after this epoch.
+            self._step_scheduler(
+                validation_metrics
+            )
+    
+            if improved:
                 save_checkpoint(
                     self.checkpoint_dir
                     /
@@ -930,9 +914,6 @@ class Pretrainer:
                         ),
                     },
                 )
-
-            else:
-                bad_epochs += 1
 
             save_checkpoint(
                 self.checkpoint_dir
@@ -975,11 +956,7 @@ class Pretrainer:
                     f"{selection_metric}={current_metric:.6f}, "
                     f"best={best_metric:.6f}"
                 )
-
-            self._step_scheduler(
-                validation_metrics
-            )
-
+                
             if (
                 patience is not None
                 and bad_epochs >= patience
