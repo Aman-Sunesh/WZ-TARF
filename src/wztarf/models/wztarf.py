@@ -658,6 +658,8 @@ class WZTARF(nn.Module):
             "lane_context": topology["lane_context"],
             "lane_mask": lane["lane_mask"],
             "lane_xy": lane["lane_xy"],
+            "lane_centerline": lane["lane_centerline"],
+            "lane_point_mask": lane["lane_point_mask"],
             "node_viability": topology["node_viability"],
             "edge_viability": topology["edge_viability"],
             "horizon_context": horizon_context,
@@ -679,8 +681,8 @@ class WZTARF(nn.Module):
             horizon_context=scene["horizon_context"],
             lane_states=scene["lane_states"],
             lane_mask=scene["lane_mask"],
-            lane_centerline=lane["lane_centerline"],
-            lane_point_mask=lane["lane_point_mask"],
+            lane_centerline=scene["lane_centerline"],
+            lane_point_mask=scene["lane_point_mask"],
         )
 
         map_exit_goal = self.map_exit_head(
@@ -688,15 +690,6 @@ class WZTARF(nn.Module):
             route["goal_context"],
             scene["ego_context"],
         )
-
-        # Blend the predicted terminal anchor toward the learned continuous
-        # continuation goal when the route query assigns MAP_EXIT probability.
-        exit_probability = route[
-            "goal_prob"
-        ][
-            ...,
-            -1:
-        ]
 
         route_anchors = route[
             "route_anchors"
@@ -706,22 +699,19 @@ class WZTARF(nn.Module):
             :,
             :,
             -1,
-        ] = (
-            (
-                1.0
-                -
-                exit_probability
-            )
-            *
+        ] = torch.where(
+            route[
+                "goal_is_map_exit"
+            ][
+                ...,
+                None,
+            ],
+            map_exit_goal,
             route_anchors[
                 :,
                 :,
                 -1,
-            ]
-            +
-            exit_probability
-            *
-            map_exit_goal
+            ],     
         )
 
         dynamics_xy = self.dynamics_anchor(
