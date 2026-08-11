@@ -126,7 +126,11 @@ class AgentEncoder(nn.Module):
             device=x.device,
         )
 
-        last_state = temporal[
+      projected_temporal = self.projection(
+          temporal
+      )
+
+      last_state = projected_temporal[
             flat_index,
             last_index,
         ]
@@ -143,13 +147,23 @@ class AgentEncoder(nn.Module):
             )
         )
 
-        agent_states = self.projection(
-            last_state
-        ).reshape(
+        agent_states = last_state.reshape(
             batch_size,
             num_agents,
             self.output_dim,
         )
+
+      agent_temporal_states = projected_temporal.reshape(
+          batch_size,
+          num_agents,
+          history_steps,
+          self.output_dim,
+      ).permute(
+          0,
+          2,
+          1,
+          3,
+      )
 
         agent_present = present.reshape(
             batch_size,
@@ -236,6 +250,7 @@ class AgentEncoder(nn.Module):
                     ]
 
         return {
+            "agent_temporal_states": agent_temporal_states,
             "agent_states": agent_states,
             "agent_context": pooled,
             "agent_relevance": weights,
