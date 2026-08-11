@@ -414,7 +414,9 @@ class RouteGoalQueries(nn.Module):
 
         lane_logits = lane_logits.masked_fill(
             ~lane_mask[:, None, :].bool(),
-            -1e9,
+            torch.finfo(
+                lane_logits.dtype
+            ).min,
         )
 
         exit_logit = self.map_exit_logit(
