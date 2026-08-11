@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
+from wztarf.geometry.lanes import lane_edge_relation_features
 
 class TemporaryTopologyAdapter(nn.Module):
     """Compute soft lane-node and lane-edge viability around the WorkZone."""
@@ -35,10 +36,22 @@ class TemporaryTopologyAdapter(nn.Module):
             num_edge_types,
             d_model,
         )
+        
+        self.relation_encoder = nn.Sequential(
+            nn.Linear(
+                7,
+                d_model,
+            ),
+            nn.ReLU(),
+            nn.Linear(
+                d_model,
+                d_model,
+            ),
+        )
 
         self.edge_viability = nn.Sequential(
             nn.Linear(
-                4 * d_model,
+                5 * d_model,
                 2 * d_model,
             ),
             nn.ReLU(),
@@ -105,11 +118,32 @@ class TemporaryTopologyAdapter(nn.Module):
         lane_edge_type: torch.Tensor,
         lane_edge_mask: torch.Tensor,
         wz_context: torch.Tensor,
+        *,
+        lane_xy: torch.Tensor,
+        lane_heading: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         """Return WZ-adapted lane states and soft topology scores."""
         batch_size, num_lanes, _ = lane_states.shape
         num_edges = lane_edge_index.shape[-1]
 
+        if lane_xy.shape != (
+            batch_size,
+            num_lanes,
+            2,
+        ):
+            raise ValueError(
+                "lane_xy must have shape [B, L, 2]."
+            )
+        
+        if lane_heading.shape != (
+            batch_size,
+            num_lanes,
+            2,
+        ):
+            raise ValueError(
+                "lane_heading must have shape [B, L, 2]."
+            )
+    
         wz_nodes = wz_context[:, None].expand(
             -1,
             num_lanes,
@@ -233,6 +267,17 @@ class TemporaryTopologyAdapter(nn.Module):
                 edge_type
             )
 
+            relation = lane_edge_relation_features(
+                lane_xy[b],
+                lane_heading[b],
+                src,
+                dst,
+            )
+            
+            relation_embedding = self.relation_encoder(
+                relation
+            )
+
             wz = wz_context[
                 b
             ][None].expand(
@@ -250,11 +295,12 @@ class TemporaryTopologyAdapter(nn.Module):
                         b,
                         dst,
                     ],
+                    relation_embedding,
                     edge_embedding,
                     wz,
                 ),
                 dim=-1,
-            )
+)
 
             gate = torch.sigmoid(
                 self.edge_viability(
