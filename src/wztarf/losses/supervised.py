@@ -263,6 +263,9 @@ def supervised_loss(
             retained_lane_mask=retained_lane_mask,
             association_tolerance_m=goal_association_tolerance_m,
             road_gt_tolerance_m=road_gt_tolerance_m,
+            compute_road_reliability=(
+                weights.road > 0
+            ),
         )
 
     components: dict[str, torch.Tensor] = {}
