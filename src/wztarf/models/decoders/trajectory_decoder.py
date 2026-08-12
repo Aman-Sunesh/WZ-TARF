@@ -59,53 +59,56 @@ def _interpolate_route_anchors(
         device=route_anchors.device,
     )
 
-    output = []
-
-    for time in times:
-        if time <= 1.0:
-            left = 0
-            right = 1
-
-        elif time <= 3.0:
-            left = 1
-            right = 2
-
-        else:
-            left = 2
-            right = 3
-
-        alpha = (
-            time
-            -
-            anchor_times[left]
-        ) / (
-            anchor_times[right]
-            -
-            anchor_times[left]
+    # For t in (0, 1] -> anchor interval [0, 1]
+    # For t in (1, 3] -> anchor interval [1, 3]
+    # For t in (3, 5] -> anchor interval [3, 5]
+    right = (
+        torch.bucketize(
+            times,
+            anchor_times[1:],
+            right=False,
         )
-
-        point = (
-            anchors[:, :, left]
-            +
-            alpha
-            *
-            (
-                anchors[:, :, right]
-                -
-                anchors[:, :, left]
-            )
-        )
-
-        output.append(
-            point
-        )
-
-    return torch.stack(
-        output,
-        dim=2,
+        +
+        1
     )
 
+    left = right - 1
 
+    left_time = anchor_times[left]
+    right_time = anchor_times[right]
+
+    alpha = (
+        (times - left_time)
+        /
+        (right_time - left_time)
+    ).view(
+        1,
+        1,
+        future_steps,
+        1,
+    )
+
+    left_point = anchors.index_select(
+        2,
+        left,
+    )
+    right_point = anchors.index_select(
+        2,
+        right,
+    )
+
+    return (
+        left_point
+        +
+        alpha
+        *
+        (
+            right_point
+            -
+            left_point
+        )
+    )
+    
 class TrajectoryDecoder(nn.Module):
     """Decode 25-step route-conditioned residual trajectories."""
 
