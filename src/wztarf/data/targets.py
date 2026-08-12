@@ -71,6 +71,7 @@ def build_supervised_targets(
     retained_lane_mask: torch.Tensor,
     association_tolerance_m: float = 0.25,
     road_gt_tolerance_m: float = 0.25,
+    compute_road_reliability: bool = True,
 ) -> SupervisedTargets:
     """Build supervised map targets without treating ambiguity as MAP_EXIT.
 
@@ -154,30 +155,31 @@ def build_supervised_targets(
             raw_lane_mask,
         )
 
-        distance = distance_to_lane_union(
-            gt_xy[
-                b
-            ],
-            lane_feat[
-                b
-            ],
-            lane_point_mask[
-                b
-            ],
-            raw_lane_mask,
-        )
-
-        road_reliability[
-            b
-        ] = (
-            coverage
-            &
-            (
-                distance
-                <=
-                road_gt_tolerance_m
+        if compute_road_reliability:
+            distance = distance_to_lane_union(
+                gt_xy[
+                    b
+                ],
+                lane_feat[
+                    b
+                ],
+                lane_point_mask[
+                    b
+                ],
+                raw_lane_mask,
             )
-        )
+
+            road_reliability[
+                b
+            ] = (
+                coverage
+                &
+                (
+                    distance
+                    <=
+                    road_gt_tolerance_m
+                )
+            )
 
         endpoint = gt_xy[
             b,
