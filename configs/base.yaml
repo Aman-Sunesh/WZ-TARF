@@ -10,8 +10,13 @@ data:
   train_split: train
   val_split: val
   test_split: test
-  num_workers: 0
+  num_workers: 4
   pin_memory: true
+  prefetch_factor: 2
+
+  # Dataset was already validated during preprocessing/tests.
+  validate_samples: false
+  edge_validation_samples: 64
 
 model:
   d_model: 128
