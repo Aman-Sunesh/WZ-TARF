@@ -85,15 +85,37 @@ def validate_edge_type_capacity(
     dataset: Dataset,
     *,
     num_edge_types: int,
+    max_samples: int | None = None,
 ) -> None:
-    """Verify serialized edge IDs fit the model embedding table."""
+    """Verify sampled serialized edge IDs fit the model embedding table.
+
+    A full dataset scan is intentionally optional because opening every
+    individual `.pt` file at training startup can take many minutes.
+    """
     maximum = -1
 
-    for index in range(
-        len(
-            dataset
-        )
-    ):
+    dataset_size = len(dataset)
+
+    if dataset_size == 0:
+        return
+
+    if max_samples is None or max_samples >= dataset_size:
+        indices = range(dataset_size)
+    else:
+        if max_samples <= 0:
+            return
+
+        # Deterministic approximately-uniform coverage over the dataset.
+        step = dataset_size / float(max_samples)
+        indices = [
+            min(
+                int(sample_index * step),
+                dataset_size - 1,
+            )
+            for sample_index in range(max_samples)
+        ]
+
+    for index in indices:
         sample = dataset[
             index
         ]
