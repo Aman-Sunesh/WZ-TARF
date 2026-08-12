@@ -256,13 +256,6 @@ class TemporaryTopologyAdapter(nn.Module):
             if src.numel() == 0:
                 continue
 
-            if int(
-                edge_type.max().item()
-            ) >= self.edge_type_embedding.num_embeddings:
-                raise ValueError(
-                    "lane_edge_type exceeds configured num_edge_types."
-                )
-
             edge_embedding = self.edge_type_embedding(
                 edge_type
             )
