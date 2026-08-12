@@ -187,6 +187,13 @@ def main() -> None:
     data_config = config["data"]
     training_config = config["training"]
 
+    validate_samples = bool(
+        data_config.get(
+            "validate_samples",
+            False,
+        )
+    )
+
     num_workers = (
         args.num_workers
         if args.num_workers is not None
@@ -204,7 +211,7 @@ def main() -> None:
             "train_split",
             "train",
         ),
-        validate=True,
+        validate=validate_samples,
     )
 
     val_dataset = WorkZoneDataset(
@@ -213,19 +220,28 @@ def main() -> None:
             "val_split",
             "val",
         ),
-        validate=True,
+        validate=validate_samples,
     )
 
-    validate_edge_type_capacity(
-        train_dataset,
-        num_edge_types=int(
-            config[
-                "model"
-            ][
-                "num_edge_types"
-            ]
-        ),
+    edge_validation_samples = int(
+        data_config.get(
+            "edge_validation_samples",
+            64,
+        )
     )
+
+    if edge_validation_samples > 0:
+        validate_edge_type_capacity(
+            train_dataset,
+            num_edge_types=int(
+                config[
+                    "model"
+                ][
+                    "num_edge_types"
+                ]
+            ),
+            max_samples=edge_validation_samples,
+        )
 
     pin_memory = (
         bool(
@@ -242,6 +258,27 @@ def main() -> None:
         seed
     )
 
+    loader_worker_kwargs = {}
+
+    if num_workers > 0:
+        loader_worker_kwargs = {
+            "persistent_workers": True,
+            "prefetch_factor": int(
+                data_config.get(
+                    "prefetch_factor",
+                    2,
+                )
+            ),
+        }
+
+    print(
+        f"[data] train={len(train_dataset)} "
+        f"val={len(val_dataset)} "
+        f"workers={num_workers} "
+        f"validate_samples={validate_samples}",
+        flush=True,
+    )
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=int(
@@ -255,9 +292,7 @@ def main() -> None:
         collate_fn=collate_workzone_batch,
         worker_init_fn=seed_worker,
         generator=generator,
-        persistent_workers=(
-            num_workers > 0
-        ),
+        **loader_worker_kwargs,
     )
 
     val_loader = DataLoader(
@@ -272,9 +307,7 @@ def main() -> None:
         pin_memory=pin_memory,
         collate_fn=collate_workzone_batch,
         worker_init_fn=seed_worker,
-        persistent_workers=(
-            num_workers > 0
-        ),
+        **loader_worker_kwargs,
     )
 
     model = WZTARF(
