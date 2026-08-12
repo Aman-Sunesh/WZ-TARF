@@ -152,14 +152,6 @@ class _LaneGraphLayer(nn.Module):
                         valid_nodes
                     ]
 
-                if src.numel() > 0:
-                    if int(
-                        etype.max().item()
-                    ) >= self.edge_embedding.num_embeddings:
-                        raise ValueError(
-                            "lane_edge_type exceeds configured num_edge_types."
-                        )
-
                     edge_feature = self.edge_embedding(
                         etype
                     )
