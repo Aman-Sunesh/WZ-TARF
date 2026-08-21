@@ -512,7 +512,7 @@ def save_final_bundle(
         "a20": torch_load(a20_path),
         "config": dict(config),
         "pipeline": [
-            "phase_a", "phase_b", "direct_k6_target08_16",
+            "phase_a", "phase_b", "progressfix", "dense_progress_headonly", "direct_k6_target08_16",
             "anchor_calibration_dual_winner", "native_k64_intermediate_adaptation",
             "A3F1_exact_one_epoch", "fixed12", "endpoint_zero", "A20",
         ],
