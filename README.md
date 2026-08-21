@@ -78,12 +78,17 @@ minFDE6 = 2.009524822
 
 The complete WZ-TARF training pipeline is:
 
-```text
-Phase A
+```textPhase A
   Representation pretraining
         ↓
 Phase B
   Base trajectory predictor
+        ↓
+ProgressFix
+  Trajectory-progress refinement
+        ↓
+Dense-progress HEADONLY
+  Dense progress head refinement
         ↓
 Direct-K6 trajectory generator
         ↓
@@ -93,7 +98,14 @@ Native-K64 intermediate adaptation
         ↓
 A3:F1 K=6 refinement
         ↓
-Longitudinal and lateral calibration
+X fixed12
+  Longitudinal calibration
+        ↓
+X endpoint-zero
+  Longitudinal trajectory-shape correction
+        ↓
+A20
+  Late-horizon refinement
         ↓
 Final WZ-TARF predictor
 ```
