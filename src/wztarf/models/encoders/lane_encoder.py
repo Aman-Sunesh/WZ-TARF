@@ -74,170 +74,72 @@ class _LaneGraphLayer(nn.Module):
         edge_type: torch.Tensor,
         edge_mask: torch.Tensor,
     ) -> torch.Tensor:
-        """Propagate valid typed edges independently within each batch item."""
-        output = []
+        """Propagate typed lane edges for the full batch in one tensor path."""
+        batch_size, num_lanes, d_model = nodes.shape
+        num_edges = edge_index.shape[-1]
 
-        for b in range(
-            nodes.shape[0]
-        ):
-            h = nodes[b]
-            aggregate = torch.zeros_like(
-                h
+        src = edge_index[:, 0].long()
+        dst = edge_index[:, 1].long()
+        valid = edge_mask.bool().clone()
+        valid &= (src >= 0) & (dst >= 0) & (src < num_lanes) & (dst < num_lanes)
+
+        safe_src = src.clamp(0, max(num_lanes - 1, 0))
+        safe_dst = dst.clamp(0, max(num_lanes - 1, 0))
+        valid &= node_mask.gather(1, safe_src) & node_mask.gather(1, safe_dst)
+
+        flat_nodes = nodes.reshape(batch_size * num_lanes, d_model)
+        aggregate = torch.zeros_like(flat_nodes)
+        count = torch.zeros(
+            batch_size * num_lanes,
+            1,
+            dtype=nodes.dtype,
+            device=nodes.device,
+        )
+
+        if bool(valid.any()):
+            batch_index = torch.arange(batch_size, device=nodes.device)[:, None].expand(
+                batch_size, num_edges
             )
+            b = batch_index[valid]
+            local_src = src[valid]
+            local_dst = dst[valid]
+            etype = edge_type.long()[valid]
+            global_src = b * num_lanes + local_src
+            global_dst = b * num_lanes + local_dst
 
-            count = torch.zeros(
-                h.shape[0],
-                1,
-                dtype=h.dtype,
-                device=h.device,
+            edge_feature = self.edge_embedding(etype)
+            relation = lane_edge_relation_features(
+                lane_xy.reshape(batch_size * num_lanes, 2),
+                lane_heading.reshape(batch_size * num_lanes, 2),
+                global_src,
+                global_dst,
             )
-
-            valid_edges = torch.nonzero(
-                edge_mask[b].bool(),
-                as_tuple=False,
-            ).flatten()
-
-            if valid_edges.numel() > 0:
-                src = edge_index[
-                    b,
-                    0,
-                    valid_edges,
-                ].long()
-
-                dst = edge_index[
-                    b,
-                    1,
-                    valid_edges,
-                ].long()
-
-                etype = edge_type[
-                    b,
-                    valid_edges,
-                ].long()
-
-                valid_index = (
-                    (src >= 0)
-                    &
-                    (dst >= 0)
-                    &
-                    (src < h.shape[0])
-                    &
-                    (dst < h.shape[0])
-                )
-
-                src = src[
-                    valid_index
-                ]
-                dst = dst[
-                    valid_index
-                ]
-                etype = etype[
-                    valid_index
-                ]
-
-                if src.numel() > 0:
-                    valid_nodes = (
-                        node_mask[b, src]
-                        &
-                        node_mask[b, dst]
-                    )
-
-                    src = src[
-                        valid_nodes
-                    ]
-                    dst = dst[
-                        valid_nodes
-                    ]
-                    etype = etype[
-                        valid_nodes
-                    ]
-
-                    edge_feature = self.edge_embedding(
-                        etype
-                    )
-
-                    relation = lane_edge_relation_features(
-                        lane_xy[b],
-                        lane_heading[b],
-                        src,
-                        dst,
-                    )
-                    
-                    relation_feature = self.relation_encoder(
-                        relation
-                    )
-                    
-                    message = self.message(
-                        torch.cat(
-                            (
-                                h[src],
-                                edge_feature,
-                                relation_feature,
-                            ),
-                            dim=-1,
-                        )
-                    )
-
-                    # AMP may produce FP16 messages while the graph state and
-                    # accumulation buffer remain FP32. Accumulate in the graph
-                    # state's dtype for numerical stability.
-                    message = message.to(
-                        dtype=aggregate.dtype
-                    )
-
-                    aggregate.index_add_(
-                        0,
-                        dst,
-                        message,
-                    )
-
-                    count.index_add_(
-                        0,
-                        dst,
-                        torch.ones(
-                            dst.shape[0],
-                            1,
-                            dtype=h.dtype,
-                            device=h.device,
-                        ),
-                    )
-
-            aggregate = aggregate / count.clamp_min(
-                1.0
-            )
-
-            updated = self.update(
+            relation_feature = self.relation_encoder(relation)
+            message = self.message(
                 torch.cat(
-                    (
-                        h,
-                        aggregate,
-                    ),
+                    (flat_nodes[global_src], edge_feature, relation_feature),
                     dim=-1,
                 )
+            ).to(dtype=aggregate.dtype)
+
+            aggregate.index_add_(0, global_dst, message)
+            count.index_add_(
+                0,
+                global_dst,
+                torch.ones(
+                    global_dst.shape[0],
+                    1,
+                    dtype=count.dtype,
+                    device=count.device,
+                ),
             )
 
-            h = self.norm(
-                h
-                +
-                updated
-            )
-
-            h = (
-                h
-                *
-                node_mask[b, :, None].to(
-                    h.dtype
-                )
-            )
-
-            output.append(
-                h
-            )
-
-        return torch.stack(
-            output,
-            dim=0,
+        aggregate = (aggregate / count.clamp_min(1.0)).reshape(
+            batch_size, num_lanes, d_model
         )
+        updated = self.update(torch.cat((nodes, aggregate), dim=-1))
+        output = self.norm(nodes + updated)
+        return output * node_mask[..., None].to(output.dtype)
 
 
 class LaneEncoder(nn.Module):
@@ -251,11 +153,15 @@ class LaneEncoder(nn.Module):
         graph_layers: int = 2,
         num_edge_types: int = 16,
         lane_attr_dim: int = 10,
+        encode_points: int = 48,
     ) -> None:
         super().__init__()
 
         self.d_model = d_model
         self.top_seed_lanes = top_seed_lanes
+        self.encode_points = int(encode_points)
+        if self.encode_points < 2:
+            raise ValueError("encode_points must be at least 2.")
 
         self.point_encoder = nn.Sequential(
             nn.Linear(
@@ -298,18 +204,6 @@ class LaneEncoder(nn.Module):
             ),
         )
 
-        self.relevance = nn.Sequential(
-            nn.Linear(
-                3 * d_model,
-                d_model,
-            ),
-            nn.ReLU(),
-            nn.Linear(
-                d_model,
-                1,
-            ),
-        )
-
         self.graph = nn.ModuleList(
             [
                 _LaneGraphLayer(
@@ -321,6 +215,48 @@ class LaneEncoder(nn.Module):
                 )
             ]
         )
+
+    def _point_encoder_inputs(
+        self,
+        lane_feat: torch.Tensor,
+        point_mask: torch.Tensor,
+        *,
+        compact: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the point subset used by the expensive point MLP.
+
+        Canonical lane masks are packed.  In Phase B we sample at most
+        ``encode_points`` per lane before the MLP; full geometry remains
+        untouched for lane XY/heading and route-goal interpolation.
+        """
+        if not compact or lane_feat.shape[2] <= self.encode_points:
+            return lane_feat, point_mask
+
+        batch_size, num_lanes, num_points, feature_dim = lane_feat.shape
+        sample_count = min(self.encode_points, num_points)
+        count = point_mask.sum(dim=-1).long()
+        slot = torch.arange(sample_count, device=lane_feat.device).view(1, 1, -1)
+
+        last = (count - 1).clamp_min(0)[..., None]
+        if sample_count == 1:
+            uniform = torch.zeros_like(slot).expand(batch_size, num_lanes, -1)
+        else:
+            uniform = torch.round(
+                slot.to(lane_feat.dtype)
+                * last.to(lane_feat.dtype)
+                / float(sample_count - 1)
+            ).long()
+
+        dense = slot.expand(batch_size, num_lanes, -1)
+        index = torch.where(count[..., None] >= sample_count, uniform, dense)
+        index = index.clamp(0, num_points - 1)
+        sampled_mask = dense < count[..., None].clamp_max(sample_count)
+        sampled_feat = lane_feat.gather(
+            2,
+            index[..., None].expand(-1, -1, -1, feature_dim),
+        )
+        sampled_feat = sampled_feat * sampled_mask[..., None].to(sampled_feat.dtype)
+        return sampled_feat, sampled_mask
 
     def forward(
         self,
@@ -334,7 +270,8 @@ class LaneEncoder(nn.Module):
         wz_context: torch.Tensor,
         lane_attr: torch.Tensor | None = None,
         compact: bool = True,
-    ) -> dict[str, torch.Tensor]:
+        return_point_states: bool = True,
+    ) -> dict[str, torch.Tensor | None]:
         """Encode lanes and return selected graph states."""
         if lane_feat.ndim != 4:
             raise ValueError(
@@ -349,8 +286,14 @@ class LaneEncoder(nn.Module):
             lane_mask.bool()[:, :, None]
         )
 
+        encoder_feat, encoder_point_mask = self._point_encoder_inputs(
+            lane_feat,
+            point_mask,
+            compact=compact,
+        )
+
         point_state = self.point_encoder(
-            lane_feat
+            encoder_feat
         )
 
         attention_logit = self.point_attention(
@@ -358,7 +301,7 @@ class LaneEncoder(nn.Module):
         ).squeeze(-1)
 
         attention_logit = attention_logit.masked_fill(
-            ~point_mask,
+            ~encoder_point_mask,
             torch.finfo(
                 attention_logit.dtype
             ).min,
@@ -372,7 +315,7 @@ class LaneEncoder(nn.Module):
         attention = (
             attention
             *
-            point_mask.to(
+            encoder_point_mask.to(
                 attention.dtype
             )
         )
@@ -395,7 +338,7 @@ class LaneEncoder(nn.Module):
         )
 
         masked_point_state = point_state.masked_fill(
-            ~point_mask[..., None],
+            ~encoder_point_mask[..., None],
             float("-inf"),
         )
 
@@ -403,7 +346,7 @@ class LaneEncoder(nn.Module):
             dim=2
         ).values
 
-        has_point = point_mask.any(
+        has_point = encoder_point_mask.any(
             dim=-1
         )
 
@@ -562,149 +505,25 @@ class LaneEncoder(nn.Module):
 
         
         
-        ego = ego_context[:, None].expand(
-            -1,
-            num_lanes,
-            -1,
-        )
-
-        wz = wz_context[:, None].expand(
-            -1,
-            num_lanes,
-            -1,
-        )
-
-        relevance_logit = self.relevance(
-            torch.cat(
-                (
-                    lane_state,
-                    ego,
-                    wz,
-                ),
-                dim=-1,
-            )
-        ).squeeze(-1)
-
-        relevance_logit = relevance_logit.masked_fill(
-            ~valid_lane,
-            torch.finfo(
-                attention_logit.dtype
-            ).min,
-        )
-        if not compact:
-            # Phase A pretraining keeps every valid represented lane.
-            active_mask = valid_lane.clone()
-
-        else:
-            active_mask = torch.zeros_like(
-                valid_lane
-            )
-
-            # Supervised forecasting keeps Top-k seeds plus one-hop neighbors.
-            for b in range(
-                batch_size
-            ):
-                valid_indices = torch.nonzero(
-                    valid_lane[b],
-                    as_tuple=False,
-                ).flatten()
-
-                if valid_indices.numel() == 0:
-                    continue
-
-                k = min(
-                    self.top_seed_lanes,
-                    int(
-                        valid_indices.numel()
-                    ),
-                )
-
-                local_scores = relevance_logit[
-                    b,
-                    valid_indices,
-                ]
-
-                selected_local = torch.topk(
-                    local_scores,
-                    k=k,
-                ).indices
-
-                seeds = valid_indices[
-                    selected_local
-                ]
-
-                active_mask[
-                    b,
-                    seeds,
-                ] = True
-
-                valid_edges = torch.nonzero(
-                    lane_edge_mask[b].bool(),
-                    as_tuple=False,
-                ).flatten()
-
-                if valid_edges.numel() == 0:
-                    continue
-
-                src = lane_edge_index[
-                    b,
-                    0,
-                    valid_edges,
-                ].long()
-
-                dst = lane_edge_index[
-                    b,
-                    1,
-                    valid_edges,
-                ].long()
-
-                in_bounds = (
-                    (src >= 0)
-                    &
-                    (dst >= 0)
-                    &
-                    (src < num_lanes)
-                    &
-                    (dst < num_lanes)
-                )
-
-                src = src[
-                    in_bounds
-                ]
-
-                dst = dst[
-                    in_bounds
-                ]
-
-                for seed in seeds:
-                    connected = (
-                        (src == seed)
-                        |
-                        (dst == seed)
-                    )
-
-                    neighbors = torch.cat(
-                        (
-                            src[
-                                connected
-                            ],
-                            dst[
-                                connected
-                            ],
-                        )
-                    )
-
-                    active_mask[
-                        b,
-                        neighbors,
-                    ] = True
-
-        active_mask &= valid_lane
+        # ==========================================================
+        # V3 ARCHITECTURE FREEZE: KEEP ALL VALID RETAINED LANES
+        #
+        # The dataset already caps the represented map at <= 74 lanes.
+        # The former learned relevance MLP fed a discrete torch.topk,
+        # so its parameters received no gradient while random
+        # initialization could decide which lanes survived.
+        #
+        # V3 therefore performs no learned hard lane pruning.
+        # ==========================================================
+        active_mask = valid_lane.clone()
 
         lane_state = (
             lane_state
             *
-            active_mask[..., None].to(
+            active_mask[
+                ...,
+                None,
+            ].to(
                 lane_state.dtype
             )
         )
@@ -720,12 +539,28 @@ class LaneEncoder(nn.Module):
                 lane_edge_mask,
             )
 
-        pooled_score = relevance_logit.masked_fill(
+        # Parameter-free deterministic pooling priority.
+        # Ego coordinates are centered at the origin, so nearby lanes
+        # receive larger pooling logits without introducing another
+        # learned selector.
+        pooled_score = (
+            -torch.linalg.vector_norm(
+                lane_xy.float(),
+                dim=-1,
+            )
+        ).to(
+            lane_state.dtype
+        )
+
+        pooled_score = pooled_score.masked_fill(
             ~active_mask,
             torch.finfo(
-                attention_logit.dtype
+                pooled_score.dtype
             ).min,
         )
+
+        # Preserve any legacy diagnostic return using this name.
+        relevance_logit = pooled_score
 
         pooled_weight = torch.softmax(
             pooled_score,
@@ -782,9 +617,11 @@ class LaneEncoder(nn.Module):
             "lane_point_states": (
                 point_state
                 *
-                point_mask[..., None].to(
+                encoder_point_mask[..., None].to(
                     point_state.dtype
                 )
+                if return_point_states
+                else None
             ),
             "lane_states": lane_state,
             "lane_context": lane_context,

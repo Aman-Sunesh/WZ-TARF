@@ -5,10 +5,6 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from wztarf.geometry.workzone import (
-    distance_to_polygon,
-    points_in_polygon,
-)
 
 def _lane_segment_geometry(
     lane_feat: torch.Tensor | None,
@@ -606,6 +602,116 @@ def _segments_to_lane_distance(
         overlap,
     )
     
+
+def _batched_polygon_distance_and_inside(
+    points: torch.Tensor,
+    polygon: torch.Tensor,
+    polygon_valid: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Vectorized point-to-polygon distance and inside test.
+
+    Args:
+        points: [B, ..., 2]
+        polygon: [B, V, 2]
+        polygon_valid: [B]
+
+    Returns:
+        distance: [B, ...]
+        inside: [B, ...]
+    """
+    if points.ndim < 3 or points.shape[-1] != 2:
+        raise ValueError("points must have shape [B, ..., 2].")
+    if polygon.ndim != 3 or polygon.shape[-1] != 2:
+        raise ValueError("polygon must have shape [B, V, 2].")
+
+    batch_size = points.shape[0]
+    tail_shape = points.shape[1:-1]
+    flat = points.reshape(batch_size, -1, 2)
+
+    start = polygon[:, None, :, :]
+    end = torch.roll(polygon, shifts=-1, dims=1)[:, None, :, :]
+    point = flat[:, :, None, :]
+
+    distance = _point_segment_distance(point, start, end).min(dim=-1).values
+
+    px = point[..., 0]
+    py = point[..., 1]
+    x1 = start[..., 0]
+    y1 = start[..., 1]
+    x2 = end[..., 0]
+    y2 = end[..., 1]
+
+    crosses = (
+        ((y1 > py) != (y2 > py))
+        & (
+            px
+            < (x2 - x1) * (py - y1) / (y2 - y1 + 1e-8) + x1
+        )
+    )
+    inside = (crosses.sum(dim=-1) % 2 == 1)
+
+    # Match the reference convention that points on the polygon boundary are
+    # considered inside.  This is also numerically more stable for WZ corners.
+    inside = inside | (distance <= 1e-6)
+    inside = inside & polygon_valid[:, None]
+    distance = torch.where(
+        polygon_valid[:, None],
+        distance,
+        torch.zeros_like(distance),
+    )
+
+    return (
+        distance.reshape(batch_size, *tail_shape),
+        inside.reshape(batch_size, *tail_shape),
+    )
+
+def _subsample_packed_lane_geometry(
+    lane_feat: torch.Tensor | None,
+    lane_point_mask: torch.Tensor | None,
+    max_points: int | None,
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    """Subsample packed lane polylines before WZ/lane geometry comparisons.
+
+    WorkZoneEncoder used to compare every WZ edge/sign/worker against all 234
+    lane points during every model forward.  These comparisons are geometric,
+    not learned.  Until they are moved to the offline cache, a fixed compact
+    representation gives a large hot-path reduction while preserving the
+    overall lane shape.
+    """
+    if (
+        lane_feat is None
+        or lane_point_mask is None
+        or max_points is None
+        or lane_feat.shape[2] <= max_points
+    ):
+        return lane_feat, lane_point_mask
+
+    if max_points < 2:
+        raise ValueError("lane_geometry_points must be at least 2 or None.")
+
+    batch_size, num_lanes, num_points, feature_dim = lane_feat.shape
+    sample_count = min(int(max_points), num_points)
+    mask = lane_point_mask.bool()
+    count = mask.sum(dim=-1).long()
+    slot = torch.arange(sample_count, device=lane_feat.device).view(1, 1, -1)
+    dense = slot.expand(batch_size, num_lanes, -1)
+    last = (count - 1).clamp_min(0)[..., None]
+    uniform = torch.round(
+        dense.to(lane_feat.dtype)
+        * last.to(lane_feat.dtype)
+        / float(max(1, sample_count - 1))
+    ).long()
+    index = torch.where(count[..., None] >= sample_count, uniform, dense)
+    index = index.clamp(0, num_points - 1)
+    sampled_mask = dense < count[..., None].clamp_max(sample_count)
+    sampled_feat = lane_feat.gather(
+        2,
+        index[..., None].expand(-1, -1, -1, feature_dim),
+    )
+    sampled_feat = sampled_feat * sampled_mask[..., None].to(sampled_feat.dtype)
+    return sampled_feat, sampled_mask
+
+
 class WorkZoneEncoder(nn.Module):
     """Encode structured WorkZone geometry with typed self-attention."""
 
@@ -614,10 +720,14 @@ class WorkZoneEncoder(nn.Module):
         d_model: int = 128,
         num_heads: int = 4,
         num_layers: int = 2,
+        lane_geometry_points: int | None = 64,
     ) -> None:
         super().__init__()
 
         self.d_model = d_model
+        self.lane_geometry_points = lane_geometry_points
+        if lane_geometry_points is not None and lane_geometry_points < 2:
+            raise ValueError("lane_geometry_points must be at least 2 or None.")
 
         self.feature_encoder = nn.Sequential(
             nn.Linear(
@@ -677,9 +787,29 @@ class WorkZoneEncoder(nn.Module):
 
         batch_size = wz_feat.shape[0]
 
-        lane_geometry = _lane_segment_geometry(
+        # ==============================================================
+        # V3 FP32 WORKZONE GEOMETRY
+        #
+        # Geometry is deliberately evaluated from FP32 tensors even when
+        # the learned network is running under BF16 autocast.
+        # ==============================================================
+        wz_feat = wz_feat.float()
+        worker_feat = worker_feat.float()
+
+        if ego_speed is not None:
+            ego_speed = ego_speed.float()
+
+        if lane_feat is not None:
+            lane_feat = lane_feat.float()
+
+        geometry_lane_feat, geometry_lane_mask = _subsample_packed_lane_geometry(
             lane_feat,
             lane_point_mask,
+            self.lane_geometry_points,
+        )
+        lane_geometry = _lane_segment_geometry(
+            geometry_lane_feat,
+            geometry_lane_mask,
             lane_mask,
         )
 
@@ -886,14 +1016,14 @@ class WorkZoneEncoder(nn.Module):
         )
         
         if (
-            lane_feat is not None
+            geometry_lane_feat is not None
             and
-            lane_point_mask is not None
+            geometry_lane_mask is not None
             and
             lane_mask is not None
         ):
             valid_lane_point = (
-                lane_point_mask.bool()
+                geometry_lane_mask.bool()
                 &
                 lane_mask.bool()[
                     :,
@@ -902,33 +1032,15 @@ class WorkZoneEncoder(nn.Module):
                 ]
             )
         
-            for b in range(batch_size):
-                if (
-                    bool(
-                        polygon_valid[b]
-                    )
-                    and
-                    bool(
-                        valid_lane_point[b].any()
-                    )
-                ):
-                    represented_points = lane_feat[
-                        b,
-                        ...,
-                        :2,
-                    ][
-                        valid_lane_point[b]
-                    ]
-        
-                    if bool(
-                        points_in_polygon(
-                            represented_points,
-                            corners[b],
-                        ).any()
-                    ):
-                        polygon_lane_overlap[
-                            b
-                        ] = True
+            _, represented_inside = _batched_polygon_distance_and_inside(
+                geometry_lane_feat[..., :2],
+                corners,
+                polygon_valid,
+            )
+            polygon_lane_overlap = (
+                polygon_lane_overlap
+                | (represented_inside & valid_lane_point).flatten(1).any(dim=1)
+            )
         
         polygon_lane_distance = boundary_lane_distance.min(
             dim=1
@@ -1082,52 +1194,40 @@ class WorkZoneEncoder(nn.Module):
             worker_distance
         )
 
-        for b in range(batch_size):
-            if not bool(
-                polygon_valid[b]
-            ):
-                continue
-    
-            if bool(
-                sign_valid[b]
-            ):
-                sign_boundary_distance[
-                    b
-                ] = distance_to_polygon(
-                    sign_xy[
-                        b:
-                        b + 1
-                    ],
-                    corners[b],
-                )[0]
-    
-                sign_inside[
-                    b
-                ] = points_in_polygon(
-                    sign_xy[
-                        b:
-                        b + 1
-                    ],
-                    corners[b],
-                )[0].to(
-                    sign_distance.dtype
-                )
-    
-            if worker_xy.shape[1] > 0:
-                worker_boundary_distance[
-                    b
-                ] = distance_to_polygon(
-                    worker_xy[b],
-                    corners[b],
-                )
-                worker_inside[
-                    b
-                ] = points_in_polygon(
-                    worker_xy[b],
-                    corners[b],
-                ).to(
-                    worker_distance.dtype
-                )
+        sign_boundary_distance, sign_inside_bool = (
+            _batched_polygon_distance_and_inside(
+                sign_xy[:, None, :],
+                corners,
+                polygon_valid,
+            )
+        )
+        sign_boundary_distance = sign_boundary_distance[:, 0]
+        sign_inside = (
+            sign_inside_bool[:, 0]
+            & sign_valid
+        ).to(sign_distance.dtype)
+        sign_boundary_distance = torch.where(
+            sign_valid,
+            sign_boundary_distance,
+            torch.zeros_like(sign_boundary_distance),
+        )
+
+        worker_boundary_distance, worker_inside_bool = (
+            _batched_polygon_distance_and_inside(
+                worker_xy,
+                corners,
+                polygon_valid,
+            )
+        )
+        worker_inside = (
+            worker_inside_bool
+            & worker_valid
+        ).to(worker_distance.dtype)
+        worker_boundary_distance = torch.where(
+            worker_valid,
+            worker_boundary_distance,
+            torch.zeros_like(worker_boundary_distance),
+        )
 
         worker_lane_distance = _points_to_lane_distance(
             worker_xy,
@@ -1180,6 +1280,18 @@ class WorkZoneEncoder(nn.Module):
         )[:, None, :]
 
 
+        # ==============================================================
+        # V3 WZ-INDEPENDENT WORKER REPRESENTATION
+        #
+        # Worker tokens contain only ego-relative and permanent-map-relative
+        # information. No quantity derived from wz_feat is allowed here.
+        #
+        # Keep 12 channels for feature_encoder compatibility.
+        # ==============================================================
+        worker_wz_neutral = torch.zeros_like(
+            worker_distance
+        )
+
         worker_features = torch.stack(
             (
                 worker_xy[..., 0],
@@ -1189,11 +1301,21 @@ class WorkZoneEncoder(nn.Module):
                 worker_xy[..., 0] / (worker_distance + 1e-8),
                 worker_ahead,
                 worker_ttp,
-                worker_inside,
-            worker_lane_distance,
-            worker_boundary_distance,
-            worker_on_lane,
-            worker_signed_boundary_distance,
+
+                # Former worker_inside WZ-relative channel.
+                worker_wz_neutral,
+
+                # Permanent-map-relative quantity.
+                worker_lane_distance,
+
+                # Former worker_boundary_distance WZ-relative channel.
+                worker_wz_neutral,
+
+                # Permanent-map-relative quantity.
+                worker_on_lane,
+
+                # Former signed WZ-boundary-distance channel.
+                worker_wz_neutral,
             ),
             dim=-1,
         )
@@ -1248,30 +1370,103 @@ class WorkZoneEncoder(nn.Module):
             )[None]
         )
 
+        # ==============================================================
+        # V3 SEPARATE WZ / WORKER ATTENTION STREAMS
+        #
+        # Keep WZ geometry/sign tokens and worker tokens independent.
+        # The dummy visible token is stream-local so an all-masked stream
+        # cannot create NaNs inside attention.
+        # ==============================================================
+        wz_token_count = 6
+
         original_valid = token_mask.any(
             dim=1
         )
 
         safe_mask = token_mask.clone()
+        tokens = tokens.clone()
 
-        no_valid = ~original_valid
+        wz_original_valid = token_mask[
+            :,
+            :wz_token_count,
+        ].any(
+            dim=1
+        )
 
-        if bool(
-            no_valid.any()
-        ):
+        safe_mask[:, 0] = (
+            safe_mask[:, 0]
+            |
+            ~wz_original_valid
+        )
+
+        tokens[:, 0] = torch.where(
+            (~wz_original_valid)[:, None],
+            torch.zeros_like(
+                tokens[:, 0]
+            ),
+            tokens[:, 0],
+        )
+
+        if tokens.shape[1] > wz_token_count:
+            worker_original_valid = token_mask[
+                :,
+                wz_token_count:,
+            ].any(
+                dim=1
+            )
+
             safe_mask[
-                no_valid,
-                0,
+                :,
+                wz_token_count,
+            ] = (
+                safe_mask[
+                    :,
+                    wz_token_count,
+                ]
+                |
+                ~worker_original_valid
+            )
+
+            tokens[
+                :,
+                wz_token_count,
+            ] = torch.where(
+                (~worker_original_valid)[:, None],
+                torch.zeros_like(
+                    tokens[
+                        :,
+                        wz_token_count,
+                    ]
+                ),
+                tokens[
+                    :,
+                    wz_token_count,
+                ],
+            )
+
+        stream_block_mask = torch.zeros(
+            (
+                tokens.shape[1],
+                tokens.shape[1],
+            ),
+            dtype=torch.bool,
+            device=tokens.device,
+        )
+
+        if tokens.shape[1] > wz_token_count:
+            stream_block_mask[
+                :wz_token_count,
+                wz_token_count:
             ] = True
 
-            tokens = tokens.clone()
-            tokens[
-                no_valid,
-                0,
-            ] = 0.0
+            stream_block_mask[
+                wz_token_count:,
+                :wz_token_count
+            ] = True
 
         tokens = self.transformer(
             tokens,
+            mask=stream_block_mask,
             src_key_padding_mask=~safe_mask,
         )
 
@@ -1324,6 +1519,113 @@ class WorkZoneEncoder(nn.Module):
             )
         )
 
+        # ==============================================================
+        # V3 EXPLICIT WZ / WORKER REPRESENTATIONS
+        #
+        # Pool each stream independently.  Workers cannot alter wz_context,
+        # and WZ geometry cannot alter worker_context through self-attention.
+        # ==============================================================
+        def _pool_stream(
+            stream_tokens: torch.Tensor,
+            stream_mask: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            if stream_tokens.shape[1] == 0:
+                return (
+                    torch.zeros(
+                        stream_tokens.shape[0],
+                        self.d_model,
+                        dtype=stream_tokens.dtype,
+                        device=stream_tokens.device,
+                    ),
+                    torch.zeros(
+                        stream_tokens.shape[0],
+                        dtype=torch.bool,
+                        device=stream_tokens.device,
+                    ),
+                )
+
+            stream_valid = stream_mask.any(
+                dim=1
+            )
+
+            stream_score = self.pool_score(
+                stream_tokens
+            ).squeeze(
+                -1
+            ).float()
+
+            stream_score = stream_score.masked_fill(
+                ~stream_mask,
+                torch.finfo(
+                    stream_score.dtype
+                ).min,
+            )
+
+            stream_weight = torch.softmax(
+                stream_score,
+                dim=1,
+            )
+
+            stream_weight = (
+                stream_weight
+                *
+                stream_mask.to(
+                    stream_weight.dtype
+                )
+            )
+
+            stream_weight = stream_weight / (
+                stream_weight.sum(
+                    dim=1,
+                    keepdim=True,
+                ).clamp_min(
+                    1e-8
+                )
+            )
+
+            stream_context = (
+                stream_tokens.float()
+                *
+                stream_weight[..., None]
+            ).sum(
+                dim=1
+            )
+
+            stream_context = (
+                stream_context
+                *
+                stream_valid[:, None].to(
+                    stream_context.dtype
+                )
+            )
+
+            return (
+                stream_context,
+                stream_valid,
+            )
+
+        wz_context, wz_valid = _pool_stream(
+            tokens[
+                :,
+                :wz_token_count,
+            ],
+            token_mask[
+                :,
+                :wz_token_count,
+            ],
+        )
+
+        worker_context, worker_valid = _pool_stream(
+            tokens[
+                :,
+                wz_token_count:,
+            ],
+            token_mask[
+                :,
+                wz_token_count:,
+            ],
+        )
+
         token_xy = torch.cat(
             (
                 midpoint,
@@ -1338,8 +1640,20 @@ class WorkZoneEncoder(nn.Module):
             "wz_tokens": tokens,
             "wz_token_mask": token_mask,
             "wz_token_xy": token_xy,
-            "wz_context": context,
-            "wz_valid": original_valid,
+            "wz_context": wz_context,
+            "wz_valid": wz_valid,
+
+            # V3 explicitly separated worker representation.
+            "worker_tokens": tokens[:, wz_token_count:],
+            "worker_token_mask": token_mask[:, wz_token_count:],
+            "worker_token_xy": token_xy[:, wz_token_count:],
+            "worker_context": worker_context,
+            "worker_valid": worker_valid,
+
+            # Explicit geometry-only WZ token views.
+            "wz_geometry_tokens": tokens[:, :wz_token_count],
+            "wz_geometry_token_mask": token_mask[:, :wz_token_count],
+            "wz_geometry_token_xy": token_xy[:, :wz_token_count],
             "boundary_lane_distance": boundary_lane_distance,
             "boundary_lane_overlap": boundary_lane_overlap,
             "polygon_lane_distance": polygon_lane_distance,
