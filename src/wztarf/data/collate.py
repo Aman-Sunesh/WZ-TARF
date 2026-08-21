@@ -327,3 +327,41 @@ try:
     from os import PathLike
 except ImportError:  # pragma: no cover
     PathLike = str
+
+
+def collate_workzone_fixed(
+    samples: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Fast collate for the canonical self-contained final WorkZone samples.
+
+    The July24 final dataset is already padded to fixed tensor capacities
+    (20 agents, 74 lanes, 234 points/lane, 512 edges).  Re-discovering maxima
+    and dispatching through variable-size padding rules every batch therefore
+    adds Python overhead without changing the tensors.  This path performs
+    direct stacking and leaves nested metadata untouched.
+
+    Use ``collate_workzone_batch`` for legacy/variable-size samples.
+    """
+    if not samples:
+        raise ValueError("Cannot collate an empty sample list.")
+
+    first = samples[0]
+    keys = first.keys()
+    batch: dict[str, Any] = {}
+
+    for key in keys:
+        values = [sample[key] for sample in samples]
+        value0 = values[0]
+
+        if key in {"meta", "map_meta", "source_path"}:
+            batch[key] = values
+        elif torch.is_tensor(value0):
+            # torch.stack itself validates shape consistency and is the only
+            # operation needed for the canonical final tensors.
+            batch[key] = torch.stack(values, dim=0)
+        elif isinstance(value0, (Mapping, str, PathLike)):
+            batch[key] = values
+        else:
+            batch[key] = default_collate(values)
+
+    return batch

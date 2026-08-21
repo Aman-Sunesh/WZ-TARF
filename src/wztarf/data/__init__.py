@@ -1,6 +1,5 @@
 """Dataset loading, batching, schema validation, and feature construction."""
-
-from .collate import collate_workzone_batch
+from .collate import collate_workzone_batch, collate_workzone_fixed
 from .dataset import WorkZoneDataset, discover_pt_files
 from .features import (
     build_control_features,
@@ -27,24 +26,14 @@ from .schema import (
     SequenceSpec,
     validate_sample,
 )
-
 __all__ = [
-    "WorkZoneDataset",
-    "discover_pt_files",
-    "collate_workzone_batch",
-    "SequenceSpec",
-    "DEFAULT_SEQUENCE_SPEC",
-    "REQUIRED_FIELDS",
-    "SampleSchemaError",
-    "validate_sample",
-    "relative_history_time",
-    "future_time",
-    "build_motion_features",
-    "build_control_features",
-    "build_gaze_features",
-    "GoalTarget",
-    "build_map_coverage_mask",
-    "build_road_reliability_mask",
-    "build_terminal_goal_target",
+    "WorkZoneDataset", "discover_pt_files",
+    "collate_workzone_batch", "collate_workzone_fixed",
+    "SequenceSpec", "DEFAULT_SEQUENCE_SPEC", "REQUIRED_FIELDS",
+    "SampleSchemaError", "validate_sample", "relative_history_time",
+    "future_time", "build_motion_features", "build_control_features",
+    "build_gaze_features", "GoalTarget", "SupervisedTargets",
+    "build_supervised_targets", "build_map_coverage_mask",
+    "build_road_reliability_mask", "build_terminal_goal_target",
     "distance_to_lane_union",
 ]

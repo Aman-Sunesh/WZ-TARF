@@ -274,3 +274,637 @@ def build_terminal_goal_target(
         valid=True,
         is_map_exit=False,
     )
+
+# === WZTARF FAST BATCHED GEOMETRY V1 ===
+
+def _batched_lane_polygon_edges(
+    lane_feat: torch.Tensor,
+    lane_point_mask: torch.Tensor,
+    lane_mask: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Build padded polygon edge tensors for all lanes in a batch.
+
+    Returns:
+        edge_start: [B, L, E, 2]
+        edge_end:   [B, L, E, 2]
+        edge_valid: [B, L, E]
+
+    The edges exactly represent the same lane polygon used by
+    reconstruct_lane_polygon(): left boundary forward, end cap,
+    right boundary backward, start cap.
+    """
+    if lane_feat.ndim != 4 or lane_feat.shape[-1] < 8:
+        raise ValueError("lane_feat must have shape [B, L, P, F] with F >= 8.")
+
+    if lane_point_mask.shape != lane_feat.shape[:3]:
+        raise ValueError("lane_point_mask must have shape [B, L, P].")
+
+    if lane_mask.shape != lane_feat.shape[:2]:
+        raise ValueError("lane_mask must have shape [B, L].")
+
+    _, _, num_points, _ = lane_feat.shape
+
+    center = lane_feat[..., 0:2]
+    left = center + lane_feat[..., 4:6]
+    right = center + lane_feat[..., 6:8]
+
+    valid = (
+        lane_point_mask.bool()
+        &
+        lane_mask.bool().unsqueeze(-1)
+    )
+
+    counts = valid.sum(dim=-1)
+
+    # Compact arbitrary valid-point masks while preserving original order.
+    rank = valid.long().cumsum(dim=-1) - 1
+    scatter_index = (
+        rank.clamp_min(0)
+        .unsqueeze(-1)
+        .expand(-1, -1, -1, 2)
+    )
+
+    valid_value = valid.unsqueeze(-1).to(center.dtype)
+
+    def _pack(value: torch.Tensor) -> torch.Tensor:
+        packed = torch.zeros_like(value)
+        packed.scatter_add_(
+            2,
+            scatter_index,
+            value * valid_value,
+        )
+        return packed
+
+    left = _pack(left)
+    right = _pack(right)
+
+    segment_position = torch.arange(
+        max(num_points - 1, 0),
+        device=lane_feat.device,
+    ).view(1, 1, -1)
+
+    segment_valid = (
+        segment_position
+        <
+        (counts - 1).clamp_min(0).unsqueeze(-1)
+    )
+
+    last_index = (counts - 1).clamp_min(0)
+
+    last_gather = (
+        last_index
+        .unsqueeze(-1)
+        .unsqueeze(-1)
+        .expand(-1, -1, 1, 2)
+    )
+
+    last_left = left.gather(
+        2,
+        last_gather,
+    ).squeeze(2)
+
+    last_right = right.gather(
+        2,
+        last_gather,
+    ).squeeze(2)
+
+    has_polygon = counts >= 2
+
+    # left boundary forward
+    left_start = left[:, :, :-1]
+    left_end = left[:, :, 1:]
+
+    # right boundary backward
+    right_start = right[:, :, 1:]
+    right_end = right[:, :, :-1]
+
+    # Polygon:
+    # left forward -> end cap -> right backward -> start cap.
+    edge_start = torch.cat(
+        (
+            left_start,
+            last_left.unsqueeze(2),
+            right_start,
+            right[:, :, 0:1],
+        ),
+        dim=2,
+    )
+
+    edge_end = torch.cat(
+        (
+            left_end,
+            last_right.unsqueeze(2),
+            right_end,
+            left[:, :, 0:1],
+        ),
+        dim=2,
+    )
+
+    edge_valid = torch.cat(
+        (
+            segment_valid,
+            has_polygon.unsqueeze(-1),
+            segment_valid,
+            has_polygon.unsqueeze(-1),
+        ),
+        dim=2,
+    )
+
+    return edge_start, edge_end, edge_valid
+
+
+def _point_to_lane_chunk(
+    points: torch.Tensor,
+    edge_start: torch.Tensor,
+    edge_end: torch.Tensor,
+    edge_valid: torch.Tensor,
+) -> torch.Tensor:
+    """Distance from points to each lane in one lane chunk.
+
+    Args:
+        points:      [B, N, 2]
+        edge_start:  [B, C, E, 2]
+        edge_end:    [B, C, E, 2]
+        edge_valid:  [B, C, E]
+
+    Returns:
+        Lane distance [B, C, N].
+        Points inside a lane polygon receive distance zero.
+    """
+    query = points[:, None, :, None, :]
+
+    start = edge_start[:, :, None, :, :]
+    end = edge_end[:, :, None, :, :]
+
+    segment = end - start
+    offset = query - start
+
+    segment_length_sq = (
+        segment.square()
+        .sum(dim=-1)
+        .clamp_min(1e-12)
+    )
+
+    alpha = (
+        (offset * segment).sum(dim=-1)
+        /
+        segment_length_sq
+    ).clamp(
+        0.0,
+        1.0,
+    )
+
+    closest = (
+        start
+        +
+        alpha.unsqueeze(-1) * segment
+    )
+
+    distance_sq = (
+        (query - closest)
+        .square()
+        .sum(dim=-1)
+    )
+
+    distance_sq = torch.where(
+        edge_valid[:, :, None, :],
+        distance_sq,
+        torch.full_like(
+            distance_sq,
+            float("inf"),
+        ),
+    )
+
+    boundary_distance = (
+        distance_sq
+        .amin(dim=-1)
+        .sqrt()
+    )
+
+    # Vectorized ray casting.
+    x = points[:, None, :, None, 0]
+    y = points[:, None, :, None, 1]
+
+    x1 = edge_start[:, :, None, :, 0]
+    y1 = edge_start[:, :, None, :, 1]
+
+    x2 = edge_end[:, :, None, :, 0]
+    y2 = edge_end[:, :, None, :, 1]
+
+    crosses_vertical = (
+        (y1 > y)
+        !=
+        (y2 > y)
+    )
+
+    intersection_x = (
+        (x2 - x1)
+        *
+        (y - y1)
+        /
+        (y2 - y1 + 1e-12)
+        +
+        x1
+    )
+
+    crossing = (
+        crosses_vertical
+        &
+        (x < intersection_x)
+        &
+        edge_valid[:, :, None, :]
+    )
+
+    inside = (
+        crossing.long().sum(dim=-1)
+        %
+        2
+        ==
+        1
+    )
+
+    return torch.where(
+        inside,
+        torch.zeros_like(boundary_distance),
+        boundary_distance,
+    )
+
+
+def distance_to_lanes_batched(
+    points: torch.Tensor,
+    lane_feat: torch.Tensor,
+    lane_point_mask: torch.Tensor,
+    lane_mask: torch.Tensor,
+    *,
+    lane_chunk_size: int = 8,
+) -> torch.Tensor:
+    """Distance from every point to every represented lane.
+
+    Args:
+        points: [B, N, 2]
+
+    Returns:
+        [B, L, N]
+    """
+    if points.ndim != 3 or points.shape[-1] != 2:
+        raise ValueError("points must have shape [B, N, 2].")
+
+    edge_start, edge_end, edge_valid = (
+        _batched_lane_polygon_edges(
+            lane_feat,
+            lane_point_mask,
+            lane_mask,
+        )
+    )
+
+    num_lanes = lane_feat.shape[1]
+
+    chunks: list[torch.Tensor] = []
+
+    for start_index in range(
+        0,
+        num_lanes,
+        lane_chunk_size,
+    ):
+        end_index = min(
+            start_index + lane_chunk_size,
+            num_lanes,
+        )
+
+        chunks.append(
+            _point_to_lane_chunk(
+                points,
+                edge_start[:, start_index:end_index],
+                edge_end[:, start_index:end_index],
+                edge_valid[:, start_index:end_index],
+            )
+        )
+
+    return torch.cat(
+        chunks,
+        dim=1,
+    )
+
+
+def distance_to_lane_union_batched(
+    points: torch.Tensor,
+    lane_feat: torch.Tensor,
+    lane_point_mask: torch.Tensor,
+    lane_mask: torch.Tensor,
+    *,
+    lane_chunk_size: int = 8,
+) -> torch.Tensor:
+    """Distance to the union of all represented lanes for batched points.
+
+    Args:
+        points: [B, N, 2]
+
+    Returns:
+        [B, N]
+    """
+    if points.ndim != 3 or points.shape[-1] != 2:
+        raise ValueError("points must have shape [B, N, 2].")
+
+    edge_start, edge_end, edge_valid = (
+        _batched_lane_polygon_edges(
+            lane_feat,
+            lane_point_mask,
+            lane_mask,
+        )
+    )
+
+    batch_size = points.shape[0]
+    num_points = points.shape[1]
+    num_lanes = lane_feat.shape[1]
+
+    union_distance = torch.full(
+        (batch_size, num_points),
+        float("inf"),
+        dtype=points.dtype,
+        device=points.device,
+    )
+
+    for start_index in range(
+        0,
+        num_lanes,
+        lane_chunk_size,
+    ):
+        end_index = min(
+            start_index + lane_chunk_size,
+            num_lanes,
+        )
+
+        lane_distance = _point_to_lane_chunk(
+            points,
+            edge_start[:, start_index:end_index],
+            edge_end[:, start_index:end_index],
+            edge_valid[:, start_index:end_index],
+        )
+
+        chunk_distance = lane_distance.amin(
+            dim=1
+        )
+
+        union_distance = torch.minimum(
+            union_distance,
+            chunk_distance,
+        )
+
+    return union_distance
+
+
+def build_map_coverage_mask_batched(
+    points: torch.Tensor,
+    lane_feat: torch.Tensor,
+    lane_point_mask: torch.Tensor,
+    lane_mask: torch.Tensor,
+    *,
+    margin_m: float = 0.0,
+) -> torch.Tensor:
+    """Vectorized map bounding-box coverage.
+
+    Args:
+        points: [B, N, 2]
+
+    Returns:
+        [B, N] boolean coverage mask.
+    """
+    if margin_m < 0:
+        raise ValueError("margin_m cannot be negative.")
+
+    center = lane_feat[..., 0:2]
+    left = center + lane_feat[..., 4:6]
+    right = center + lane_feat[..., 6:8]
+
+    valid = (
+        lane_point_mask.bool()
+        &
+        lane_mask.bool().unsqueeze(-1)
+    )
+
+    geometry = torch.stack(
+        (
+            center,
+            left,
+            right,
+        ),
+        dim=-2,
+    )
+
+    valid_geometry = valid.unsqueeze(
+        -1
+    ).unsqueeze(
+        -1
+    )
+
+    minimum = torch.where(
+        valid_geometry,
+        geometry,
+        torch.full_like(
+            geometry,
+            float("inf"),
+        ),
+    ).amin(
+        dim=(1, 2, 3)
+    )
+
+    maximum = torch.where(
+        valid_geometry,
+        geometry,
+        torch.full_like(
+            geometry,
+            float("-inf"),
+        ),
+    ).amax(
+        dim=(1, 2, 3)
+    )
+
+    minimum = minimum - margin_m
+    maximum = maximum + margin_m
+
+    has_geometry = valid.any(
+        dim=(1, 2)
+    )
+
+    return (
+        has_geometry[:, None]
+        &
+        (points[..., 0] >= minimum[:, None, 0])
+        &
+        (points[..., 0] <= maximum[:, None, 0])
+        &
+        (points[..., 1] >= minimum[:, None, 1])
+        &
+        (points[..., 1] <= maximum[:, None, 1])
+    )
+
+
+def selected_lane_longitudinal_offset_batched(
+    points: torch.Tensor,
+    lane_indices: torch.Tensor,
+    lane_feat: torch.Tensor,
+    lane_point_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Project one point per batch item onto a selected raw lane.
+
+    Args:
+        points:       [B, 2]
+        lane_indices: [B]
+
+    Returns:
+        Arc-length offsets [B].
+    """
+    batch_size, _, num_points, _ = lane_feat.shape
+
+    batch_index = torch.arange(
+        batch_size,
+        device=lane_feat.device,
+    )
+
+    selected_feat = lane_feat[
+        batch_index,
+        lane_indices.long(),
+    ]
+
+    selected_mask = lane_point_mask[
+        batch_index,
+        lane_indices.long(),
+    ].bool()
+
+    center = selected_feat[..., 0:2]
+
+    counts = selected_mask.sum(
+        dim=-1
+    )
+
+    rank = (
+        selected_mask.long()
+        .cumsum(dim=-1)
+        -
+        1
+    )
+
+    scatter_index = (
+        rank.clamp_min(0)
+        .unsqueeze(-1)
+        .expand(-1, -1, 2)
+    )
+
+    packed = torch.zeros_like(
+        center
+    )
+
+    packed.scatter_add_(
+        1,
+        scatter_index,
+        center
+        *
+        selected_mask.unsqueeze(-1).to(center.dtype),
+    )
+
+    start = packed[:, :-1]
+    end = packed[:, 1:]
+
+    segment = end - start
+
+    position = torch.arange(
+        max(num_points - 1, 0),
+        device=lane_feat.device,
+    ).unsqueeze(0)
+
+    valid_segment = (
+        position
+        <
+        (counts - 1).clamp_min(0).unsqueeze(-1)
+    )
+
+    length = torch.linalg.vector_norm(
+        segment,
+        dim=-1,
+    )
+
+    length_sq = (
+        segment.square()
+        .sum(dim=-1)
+        .clamp_min(1e-8)
+    )
+
+    alpha = (
+        (
+            (points[:, None, :] - start)
+            *
+            segment
+        ).sum(dim=-1)
+        /
+        length_sq
+    ).clamp(
+        0.0,
+        1.0,
+    )
+
+    projection = (
+        start
+        +
+        alpha.unsqueeze(-1) * segment
+    )
+
+    distance_sq = (
+        (projection - points[:, None, :])
+        .square()
+        .sum(dim=-1)
+    )
+
+    distance_sq = torch.where(
+        valid_segment,
+        distance_sq,
+        torch.full_like(
+            distance_sq,
+            float("inf"),
+        ),
+    )
+
+    closest = distance_sq.argmin(
+        dim=-1
+    )
+
+    valid_length = (
+        length
+        *
+        valid_segment.to(length.dtype)
+    )
+
+    cumulative_before = (
+        torch.cumsum(
+            valid_length,
+            dim=-1,
+        )
+        -
+        valid_length
+    )
+
+    gather_index = closest.unsqueeze(-1)
+
+    offset = (
+        cumulative_before.gather(
+            1,
+            gather_index,
+        ).squeeze(1)
+        +
+        alpha.gather(
+            1,
+            gather_index,
+        ).squeeze(1)
+        *
+        length.gather(
+            1,
+            gather_index,
+        ).squeeze(1)
+    )
+
+    return torch.where(
+        counts >= 2,
+        offset,
+        torch.zeros_like(offset),
+    )
+
+# === END WZTARF FAST BATCHED GEOMETRY V1 ===

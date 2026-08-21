@@ -54,14 +54,32 @@ def discover_pt_files(
             continue
 
         split_name = split.lower()
-        direct_split_dir = root / split
 
-        if direct_split_dir.is_dir():
-            discovered.extend(direct_split_dir.rglob("*.pt"))
+        # Fast paths for the two layouts used by WZ-TARF.  The canonical
+        # processed dataset is <root>/5hz/<split>; avoiding root.rglob here
+        # prevents an expensive recursive directory walk on every startup.
+        direct_candidates = [
+            root / split,
+            root / "5hz" / split,
+        ]
+        direct_candidates.extend(
+            sorted(root.glob(f"*hz/{split}"))
+        )
+
+        seen_direct: set[Path] = set()
+        matched_direct = False
+        for direct_split_dir in direct_candidates:
+            if direct_split_dir in seen_direct:
+                continue
+            seen_direct.add(direct_split_dir)
+            if direct_split_dir.is_dir():
+                discovered.extend(direct_split_dir.glob("*.pt"))
+                matched_direct = True
+
+        if matched_direct:
             continue
 
-        # Also support roots whose directory layout has the split nested
-        # somewhere below the root.
+        # Compatibility fallback for non-canonical layouts only.
         for path in root.rglob("*.pt"):
             lower_parts = {part.lower() for part in path.parts}
 
