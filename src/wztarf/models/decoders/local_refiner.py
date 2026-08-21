@@ -1,4 +1,4 @@
-"""Refine coarse trajectories using only nearby scene tokens."""
+"""Route-aware local trajectory refiner."""
 
 from __future__ import annotations
 
@@ -7,27 +7,42 @@ from torch import nn
 
 
 class LocalRefiner(nn.Module):
-    """Apply local cross-attention around each coarse trajectory mode."""
+    """Refine local geometry without changing route intent.
+
+    The route module owns the route decision.
+
+    The refiner may only make bounded:
+        longitudinal correction ?s
+        lateral correction ?d
+
+    in the already-selected route frame.
+    """
 
     def __init__(
         self,
         d_model: int = 128,
-        num_heads: int = 4,
         local_radius_m: float = 8.0,
+        max_longitudinal_correction_m: float = 0.75,
+        max_lateral_correction_m: float = 0.45,
     ) -> None:
         super().__init__()
 
-        if local_radius_m <= 0:
-            raise ValueError(
-                "local_radius_m must be positive."
-            )
-
         self.d_model = d_model
-        self.local_radius_m = local_radius_m
+        self.local_radius_m = float(
+            local_radius_m
+        )
 
-        self.point_encoder = nn.Sequential(
+        self.max_longitudinal_correction_m = float(
+            max_longitudinal_correction_m
+        )
+
+        self.max_lateral_correction_m = float(
+            max_lateral_correction_m
+        )
+
+        self.time_encoder = nn.Sequential(
             nn.Linear(
-                2,
+                1,
                 d_model,
             ),
             nn.ReLU(),
@@ -37,194 +52,339 @@ class LocalRefiner(nn.Module):
             ),
         )
 
-        self.attention = nn.MultiheadAttention(
-            embed_dim=d_model,
-            num_heads=num_heads,
-            batch_first=True,
-        )
-
-        self.norm = nn.LayerNorm(
-            d_model
-        )
-
-        self.delta_head = nn.Sequential(
+        # mode context
+        # + local scene context
+        # + temporal encoding
+        # + current local (s,d)
+        self.net = nn.Sequential(
             nn.Linear(
-                2 * d_model,
+                3 * d_model + 2,
                 d_model,
             ),
             nn.ReLU(),
             nn.Linear(
                 d_model,
+                d_model // 2,
+            ),
+            nn.ReLU(),
+            nn.Linear(
+                d_model // 2,
                 2,
             ),
         )
 
     def forward(
         self,
+        *,
         coarse_xy: torch.Tensor,
         mode_context: torch.Tensor,
+        route_guide: torch.Tensor,
+        route_tangent: torch.Tensor,
+        route_normal: torch.Tensor,
         scene_tokens: torch.Tensor,
         scene_xy: torch.Tensor,
         scene_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        """Return residual correction `[B, K, T, 2]`.
+    ) -> dict[str, torch.Tensor]:
+        """Return bounded route-relative local corrections."""
 
-        Scene tokens farther than `local_radius_m` from an entire coarse
-        trajectory are excluded from that trajectory's attention.
-        """
-        if coarse_xy.ndim != 4 or coarse_xy.shape[-1] != 2:
-            raise ValueError(
-                "coarse_xy must have shape [B, K, T, 2]."
-            )
-
-        batch_size, num_modes, future_steps, _ = coarse_xy.shape
-
-        if mode_context.shape[:2] != (
+        (
             batch_size,
             num_modes,
+            future_steps,
+            _,
+        ) = coarse_xy.shape
+
+        if mode_context.shape != (
+            batch_size,
+            num_modes,
+            self.d_model,
         ):
             raise ValueError(
-                "mode_context must have shape [B, K, D]."
+                "mode_context must have shape [B,K,D]."
             )
 
-        if scene_tokens.ndim != 3:
+        expected_route_shape = (
+            batch_size,
+            num_modes,
+            future_steps,
+            2,
+        )
+
+        for name, value in (
+            (
+                "route_guide",
+                route_guide,
+            ),
+            (
+                "route_tangent",
+                route_tangent,
+            ),
+            (
+                "route_normal",
+                route_normal,
+            ),
+        ):
+            if value.shape != expected_route_shape:
+                raise ValueError(
+                    f"{name} has wrong shape."
+                )
+
+        if (
+            scene_tokens.ndim != 3
+            or
+            scene_tokens.shape[
+                0
+            ]
+            !=
+            batch_size
+            or
+            scene_tokens.shape[
+                -1
+            ]
+            !=
+            self.d_model
+        ):
             raise ValueError(
-                "scene_tokens must have shape [B, N, D]."
+                "scene_tokens must have shape [B,N,D]."
             )
+
+        num_scene_tokens = (
+            scene_tokens.shape[1]
+        )
 
         if scene_xy.shape != (
             batch_size,
-            scene_tokens.shape[1],
+            num_scene_tokens,
             2,
         ):
             raise ValueError(
-                "scene_xy must have shape [B, N, 2]."
+                "scene_xy must have shape [B,N,2]."
             )
 
         if scene_mask.shape != (
             batch_size,
-            scene_tokens.shape[1],
+            num_scene_tokens,
         ):
             raise ValueError(
-                "scene_mask must have shape [B, N]."
+                "scene_mask must have shape [B,N]."
             )
 
-        # [B, K, T, N]
+        # ----------------------------------------------------------
+        # Local scene context around EACH coarse trajectory point.
+        #
+        # Includes:
+        # lanes
+        # WZ tokens
+        # agents
+        # and therefore workers where encoded by WZ tokens.
+        # ----------------------------------------------------------
+
         distance = torch.linalg.vector_norm(
-            coarse_xy[:, :, :, None, :]
+            coarse_xy[
+                :,
+                :,
+                :,
+                None,
+                :
+            ]
             -
-            scene_xy[:, None, None, :, :],
+            scene_xy[
+                :,
+                None,
+                None,
+                :,
+                :
+            ],
             dim=-1,
         )
 
-        local = (
-            distance.min(dim=2).values
-            <=
-            self.local_radius_m
-        )
-
-        local &= scene_mask[:, None, :].bool()
-
-        # Fall back to all valid tokens if nothing is locally available.
-        for b in range(batch_size):
-            for k in range(num_modes):
-                if not bool(local[b, k].any()):
-                    local[b, k] = scene_mask[b].bool()
-
-        point_query = (
-            self.point_encoder(
-                coarse_xy
+        valid = (
+            scene_mask[
+                :,
+                None,
+                None,
+                :
+            ].bool()
+            &
+            (
+                distance
+                <=
+                self.local_radius_m
             )
-            +
-            mode_context[:, :, None, :]
         )
 
-        query = point_query.reshape(
-            batch_size * num_modes,
-            future_steps,
-            self.d_model,
+        local_weight = torch.exp(
+            -distance.float()
+            /
+            max(
+                self.local_radius_m,
+                1.0e-4,
+            )
         )
 
-        keys = scene_tokens[:, None].expand(
-            batch_size,
-            num_modes,
-            scene_tokens.shape[1],
-            self.d_model,
-        ).reshape(
-            batch_size * num_modes,
-            scene_tokens.shape[1],
-            self.d_model,
+        local_weight = (
+            local_weight
+            *
+            valid.to(
+                local_weight.dtype
+            )
         )
 
-        local_mask = local.reshape(
-            batch_size * num_modes,
-            scene_tokens.shape[1],
-        )
-
-        # If a sample truly contains no scene token, return zero correction
-        # for that trajectory instead of sending an all-masked attention row.
-        no_context = ~local_mask.any(
-            dim=1
-        )
-
-        safe_mask = local_mask.clone()
-
-        if bool(no_context.any()):
-            safe_mask[
-                no_context,
-                0,
-            ] = True
-
-            keys = keys.clone()
-            keys[
-                no_context,
-                0,
-            ] = 0.0
-
-        attended, _ = self.attention(
-            query=query,
-            key=keys,
-            value=keys,
-            key_padding_mask=~safe_mask,
-            need_weights=False,
-        )
-
-        attended = self.norm(
-            query
-            +
-            attended
-        )
-
-        delta = self.delta_head(
-            torch.cat(
-                (
-                    query,
-                    attended,
-                ),
+        local_weight = (
+            local_weight
+            /
+            local_weight.sum(
                 dim=-1,
+                keepdim=True,
+            ).clamp_min(
+                1.0e-8
             )
         )
 
-        delta = delta.reshape(
+        local_context = torch.einsum(
+            "bktn,bnd->bktd",
+            local_weight.to(
+                scene_tokens.dtype
+            ),
+            scene_tokens,
+        )
+
+        # ----------------------------------------------------------
+        # Current coarse route-relative coordinates.
+        # ----------------------------------------------------------
+
+        coarse_relative = (
+            coarse_xy
+            -
+            route_guide
+        )
+
+        coarse_longitudinal = (
+            coarse_relative
+            *
+            route_tangent
+        ).sum(
+            dim=-1
+        )
+
+        coarse_lateral = (
+            coarse_relative
+            *
+            route_normal
+        ).sum(
+            dim=-1
+        )
+
+        coarse_sd = torch.stack(
+            (
+                coarse_longitudinal,
+                coarse_lateral,
+            ),
+            dim=-1,
+        )
+
+        # ----------------------------------------------------------
+        # Temporal encoding.
+        # ----------------------------------------------------------
+
+        normalized_time = torch.linspace(
+            0.0,
+            1.0,
+            future_steps,
+            dtype=coarse_xy.dtype,
+            device=coarse_xy.device,
+        )
+
+        time_context = self.time_encoder(
+            normalized_time[
+                :,
+                None,
+            ]
+        )
+
+        time_context = time_context[
+            None,
+            None,
+        ].expand(
             batch_size,
             num_modes,
             future_steps,
-            2,
+            self.d_model,
         )
 
-        if bool(no_context.any()):
-            flat = delta.reshape(
-                batch_size * num_modes,
+        mode_sequence = (
+            mode_context[
+                :,
+                :,
+                None,
+                :
+            ].expand(
+                batch_size,
+                num_modes,
                 future_steps,
-                2,
+                self.d_model,
             )
+        )
 
-            flat[
-                no_context
-            ] = 0.0
-
-            delta = flat.reshape_as(
-                delta
+        correction_raw = torch.tanh(
+            self.net(
+                torch.cat(
+                    (
+                        mode_sequence,
+                        local_context,
+                        time_context,
+                        coarse_sd,
+                    ),
+                    dim=-1,
+                )
             )
+        )
 
-        return delta
+        refinement_s = (
+            correction_raw[
+                ...,
+                0
+            ]
+            *
+            self.max_longitudinal_correction_m
+        )
+
+        refinement_d = (
+            correction_raw[
+                ...,
+                1
+            ]
+            *
+            self.max_lateral_correction_m
+        )
+
+        refinement_sd = torch.stack(
+            (
+                refinement_s,
+                refinement_d,
+            ),
+            dim=-1,
+        )
+
+        refinement_delta = (
+            refinement_s[
+                ...,
+                None
+            ]
+            *
+            route_tangent
+            +
+            refinement_d[
+                ...,
+                None
+            ]
+            *
+            route_normal
+        )
+
+        return {
+            "refinement_delta": refinement_delta,
+            "refinement_sd": refinement_sd,
+            "local_scene_context": local_context,
+            "local_scene_weight": local_weight,
+        }
