@@ -1,4 +1,6 @@
-"""Smoke test for the complete Phase A model path."""
+﻿"""Smoke test for the complete Phase A model path."""
+
+from __future__ import annotations
 
 import torch
 

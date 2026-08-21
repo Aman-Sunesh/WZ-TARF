@@ -1,4 +1,6 @@
-"""Integration test for one complete forward and backward pass."""
+﻿"""Integration test for one complete forward and backward pass."""
+
+from __future__ import annotations
 
 import torch
 
@@ -311,7 +313,13 @@ def test_wztarf_forward_backward() -> None:
             trajectory=1.0,
             endpoint=0.25,
             classification=1.0,
+            behavior=0.0,
+            ranking_quality=0.0,
+            ranking_pairwise=0.0,
             lane=1.0,
+            topology=0.0,
+            topo_diversity=0.0,
+            route_coverage=0.0,
             route=1.0,
             angle=0.0,
             dynamics=0.0,
