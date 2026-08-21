@@ -1,8 +1,6 @@
-"""Expose the forecasting model."""
+"""Expose the forecasting model and its configuration."""
 
-from .wztarf import WZTARF, WZTARFConfig
+from .config import WZTARFConfig
+from .wztarf import WZTARF
 
-__all__ = [
-    "WZTARF",
-    "WZTARFConfig",
-]
+__all__ = ["WZTARF", "WZTARFConfig"]
