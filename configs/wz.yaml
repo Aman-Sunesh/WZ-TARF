@@ -1,0 +1,269 @@
+data:
+  edge_validation_samples: 0
+  fixed_collate: true
+  fps: 5
+  future_steps: 25
+  history_steps: 10
+  num_modes: 6
+  num_workers: 4
+  pin_memory: true
+  prefetch_factor: 2
+  test_split: test
+  train_split: train
+  val_split: val
+  validate_samples: false
+evaluation:
+  batch_size: 8
+  latency_iterations: 200
+  latency_warmup: 20
+  miss_threshold_m: 2.0
+  worker_threshold_m: 2.0
+experiment:
+  name: wztarf_full_overnight
+  seed: 2023
+loss_weights:
+  angle: 0.1
+  classification: 0.0
+  behavior: 0.25
+  ranking_quality: 0.5
+  ranking_pairwise: 0.5
+  diversity: 0.0
+  dynamics: 0.25
+  endpoint: 0.5
+  lane: 1.0
+  refinement: 0.2
+  road: 0.1
+  route: 1.0
+  topology: 0.5
+  topo_diversity: 0.1
+  route_coverage: 0.5
+  trajectory: 1.0
+  worker: 0.1
+  wz_geometry: 0.1
+model:
+  agent_hidden: 64
+  control_hidden: 64
+  d_model: 128
+  fps: 5
+  future_steps: 25
+  gaze_hidden: 64
+  history_steps: 10
+  lane_graph_layers: 2
+  motion_hidden: 128
+  num_edge_types: 16
+  num_modes: 6
+  refiner_radius_m: 8.0
+  decoder_longitudinal_correction_m: 2.0
+  decoder_lateral_correction_m: 1.25
+  refiner_longitudinal_correction_m: 0.75
+  refiner_lateral_correction_m: 0.45
+  top_seed_lanes: 4
+  topology_layers: 2
+  route_topology_bias: 1.0
+  route_competition_strength: 0.5
+  route_walk_steps: 5
+  route_progress_scale_m: 8.0
+  route_exit_extension_m: 100.0
+  topology_mode: workzone
+  use_controls: true
+  use_gaze: true
+  use_workers: true
+  aux_dropout_controls: 0.1
+  aux_dropout_gaze: 0.1
+  aux_dropout_workers: 0.1
+  use_refiner: true
+  lane_encode_points: 234
+  wz_lane_geometry_points: null
+  use_dense_progress_repair: true
+pretraining:
+  batch_size: 8
+  epochs: 40
+  fac_exclusion_seconds: 5.0
+  fac_symmetric: false
+  fac_temperature: 0.1
+  grad_clip_norm: 5.0
+  learning_rate: 0.0005
+  masking:
+    agent_ratio: 0.25
+    lane_ratio: 0.25
+    primary_ratio: 0.6
+    temporal_ratio: 0.25
+    worker_ratio: 0.25
+    workzone_ratio: 0.25
+  patience: 10
+  use_amp: true
+  weight_decay: 0.0001
+  weights:
+    future_contrastive: 1.0
+    masked_reconstruction: 1.0
+    topology: 1.0
+    route_coverage: 0.5
+    route_progress: 0.5
+training:
+  batch_size: 8
+  beta_assign: 0.25
+  classification_temperature: 1.0
+  composite_fde_weight: 0.25
+  epochs: 64
+  goal_association_tolerance_m: 0.25
+  grad_clip_norm: 5.0
+  learning_rate: 0.0005
+  patience: null
+  road_gt_tolerance_m: 0.25
+  scheduler:
+    eta_min: 1.0e-05
+    type: cosine
+  selection_metric: J_val
+  selection_mode: min
+  use_amp: true
+  weight_decay: 0.0001
+canonical_pipeline:
+  hold_participants:
+  - P7
+  - P18
+  - P28
+  cache_batch_size: 32
+  dense_progress_headonly:
+    seed: 2023
+    batch_size: 8
+    epochs: 3
+    learning_rate: 0.0002
+    weight_decay: 0.0001
+    grad_clip_norm: 5.0
+    use_amp: false
+    patience: null
+    composite_fde_weight: 0.25
+    beta_assign: 1.0
+    scheduler:
+      type: cosine
+      eta_min: 0.0002
+    aux_dropout_controls: 0.1
+    aux_dropout_gaze: 0.1
+    aux_dropout_workers: 0.1
+    loss_weights:
+      trajectory: 1.0
+      endpoint: 1.0
+      route_progress_supervision: 1.0
+    structural_fingerprint:
+      tensors: 257
+      params: 2298482
+  direct_target:
+    seed: 2023
+    batch_size: 8
+    epochs: 18
+    learning_rate: 0.0002
+    weight_decay: 0.0001
+    grad_clip_norm: 5.0
+    use_amp: true
+    patience: 5
+    composite_fde_weight: 0.25
+    beta_assign: 1.0
+    scheduler:
+      type: cosine
+      eta_min: 0.0002
+    loss_weights:
+      trajectory: 1.0
+      endpoint: 1.5
+      classification: 0.25
+      dynamics: 0.05
+      diversity: 0.05
+    structural_fingerprint:
+      tensors: 314
+      params: 2822517
+      fresh_direct_tensors: 57
+  anchor_calibration:
+    seed: 2023
+    batch_size: 8
+    epochs: 10
+    learning_rate: 0.0005
+    weight_decay: 0.0
+    grad_clip_norm: 5.0
+    use_amp: true
+    eta_min: 5.0e-05
+    patience: 3
+    composite_fde_weight: 0.5
+    beta_assign: 1.0
+    structural_input:
+      tensors: 314
+      params: 2822517
+    structural_output:
+      tensors: 318
+      params: 2839287
+      fresh_anchor_tensors: 4
+      trainable_params: 16770
+  native_k64:
+    seed: 20260816
+    batch_size: 4
+    grad_accum: 8
+    warmup_epochs: 2
+    joint_epochs: 4
+    new_query_lr: 0.0002
+    shared_decoder_lr: 5.0e-05
+    backbone_lr: 1.0e-05
+    weight_decay: 0.0001
+    grad_clip_norm: 5.0
+    use_amp: true
+  a3f1:
+    seed: 20260816
+    batch_size: 8
+    epochs: 1
+    ade_weight: 3.0
+    fde_weight: 1.0
+    learning_rate: 5.0e-05
+    weight_decay: 1.0e-05
+    grad_clip_norm: 5.0
+    beta_assign: 1.0
+    epoch1_loader_seed: 20261825
+  fixed12:
+    learning_rate: 0.03
+    screen_steps: 500
+    refit_steps: 650
+    lambda_f_screen:
+    - 0.2
+    - 0.3
+    - 0.4
+    - 0.5
+    lambda_r_screen:
+    - 0.001
+    - 0.01
+  endpoint_zero:
+    seed: 20260819
+    n_basis: 7
+    cap: 1.5
+    epochs: 19
+    batch_size: 512
+    learning_rate: 0.00075
+    weight_decay: 0.0001
+    grad_clip_norm: 5.0
+    soft_ade_temperature: 0.075
+    responsibility_temperature: 0.2
+    dense_weight: 0.3
+    coefficient_regularization: 0.0125
+  a20:
+    seed: 20260838
+    actions:
+    - 0.0
+    - 0.25
+    - 0.5
+    - 0.75
+    - 1.0
+    onset: 0.75
+    power: 3.0
+    epochs: 22
+    batch_size: 512
+    learning_rate: 0.0005
+    weight_decay: 0.0001
+    grad_clip_norm: 5.0
+    margin: 0.05
+    gain_alpha: 5.0
+  progressfix:
+    enabled: true
+    phaseab_runtime_config: configs/repro_phaseab_legacy_wz.yaml
+    runtime_config: configs/repro_progressfix_wz.yaml
+    historical_trainer: repro_exact/train_progressfix_historical.py
+    input_fingerprint:
+      tensors: 247
+      params: 2243801
+    output_fingerprint:
+      tensors: 247
+      params: 2243801
