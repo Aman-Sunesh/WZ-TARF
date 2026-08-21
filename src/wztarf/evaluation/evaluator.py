@@ -10,7 +10,10 @@ from typing import Any
 import torch
 from torch.utils.data import DataLoader
 
-from .metrics_runner import compute_all_metrics
+from .metrics_runner import (
+    compute_all_metrics,
+    compute_grouped_forecasting_metrics,
+)
 from .prediction_writer import save_predictions
 
 
@@ -451,6 +454,35 @@ def evaluate_model(
         fps=fps,
         miss_threshold_m=miss_threshold_m,
         worker_threshold_m=worker_threshold_m,
+    )
+
+    metadata_for_groups: list[dict[str, Any]] = []
+
+    for index, item in enumerate(
+        metadata
+    ):
+        enriched = dict(
+            item
+        )
+
+        if (
+            index < len(source_paths)
+            and source_paths[index] is not None
+        ):
+            enriched[
+                "source_path"
+            ] = source_paths[index]
+
+        metadata_for_groups.append(
+            enriched
+        )
+
+    metrics.update(
+        compute_grouped_forecasting_metrics(
+            pred_xy=pred_xy,
+            gt_xy=gt_xy,
+            metadata=metadata_for_groups,
+        )
     )
 
     result: dict[str, Any] = {
