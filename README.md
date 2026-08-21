@@ -191,7 +191,7 @@ The No-WZ configuration uses the same overall training pipeline but replaces Wor
 
 TEST evaluation is intentionally separated from model development.
 
-To evaluate the final frozen model:
+To evaluate a freshly trained canonical pipeline on TEST after all development and model selection are complete:
 
 ```bash
 python scripts/train_full_pipeline.py \
@@ -203,7 +203,7 @@ python scripts/train_full_pipeline.py \
   --open-test
 ```
 
-A frozen final bundle can also be evaluated with:
+A freshly trained canonical bundle can also be evaluated with:
 
 ```bash
 python scripts/evaluate_final_pipeline.py \
