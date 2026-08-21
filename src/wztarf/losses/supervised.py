@@ -7,6 +7,15 @@ from typing import Any, Mapping
 
 import torch
 
+from wztarf.losses.route_set_objectives import (
+    route_set_coverage_loss,
+    topological_route_diversity_loss,
+)
+
+from wztarf.data.future_topology_targets import build_future_topology_targets
+from wztarf.losses.future_topology import future_topology_supervision_loss
+from wztarf.losses.mode_ranking import mode_ranking_loss
+
 from .classification import classification_loss
 from .directional import directional_loss
 from .diversity import diversity_loss
@@ -14,6 +23,7 @@ from .dynamics import dynamics_loss
 from .endpoint import endpoint_loss
 from .lane_goal import lane_goal_loss
 from .refinement import refinement_loss
+from .route_progress_supervision import route_progress_supervision_loss
 from .road_compliance import road_compliance_loss
 from .route import route_loss
 from .trajectory import (
@@ -35,7 +45,16 @@ class LossWeights:
     trajectory: float
     endpoint: float
     classification: float
+
+    # V3 mode ranking.
+    behavior: float
+    ranking_quality: float
+    ranking_pairwise: float
+
     lane: float
+    topology: float
+    topo_diversity: float
+    route_coverage: float
     route: float
     angle: float
     dynamics: float
@@ -44,6 +63,9 @@ class LossWeights:
     wz_geometry: float
     worker: float
     refinement: float
+
+    # V3: bind longitudinal progress to the SAME route mode.
+    route_progress_supervision: float = 0.0
 
     def __post_init__(self) -> None:
         """Reject negative loss weights."""
@@ -225,6 +247,40 @@ def supervised_loss(
         .argmin(dim=1)
     )
 
+    # --------------------------------------------------------------
+    # DIRECT-K6 METRIC-ALIGNED REGRESSION WINNERS
+    #
+    # Evaluation computes minADE_K and minFDE_K independently.
+    # A single ADE+beta*FDE winner unnecessarily couples the two
+    # regression objectives. Keep the legacy assignment winner for
+    # classification / auxiliary compatibility, but route the two
+    # core regression losses to their exact metric winners.
+    # --------------------------------------------------------------
+
+    metric_displacement = torch.linalg.vector_norm(
+        pred_xy
+        -
+        gt_xy[:, None],
+        dim=-1,
+    )
+
+    trajectory_winner_idx = (
+        metric_displacement
+        .mean(dim=-1)
+        .detach()
+        .argmin(dim=1)
+    )
+
+    endpoint_winner_idx = (
+        metric_displacement[
+            :,
+            :,
+            -1,
+        ]
+        .detach()
+        .argmin(dim=1)
+    )
+
     generated_targets = None
 
     need_map_targets = (
@@ -263,12 +319,68 @@ def supervised_loss(
             retained_lane_mask=retained_lane_mask,
             association_tolerance_m=goal_association_tolerance_m,
             road_gt_tolerance_m=road_gt_tolerance_m,
-            compute_road_reliability=(
-                weights.road > 0
-            ),
         )
 
     components: dict[str, torch.Tensor] = {}
+
+    # ==============================================================
+    # V3 FUTURE TOPOLOGY SUPERVISION
+    # ==============================================================
+    components["topology"] = gt_xy.new_zeros(())
+
+    if weights.topology > 0.0:
+        with torch.no_grad():
+            future_topology_targets = build_future_topology_targets(
+                future_xy=gt_xy,
+                lane_centerline=batch["lane_feat"][..., :2],
+                lane_point_mask=batch["lane_point_mask"],
+                lane_mask=retained_lane_mask.bool(),
+                lane_edge_index=batch["lane_edge_index"],
+                lane_edge_mask=batch["lane_edge_mask"],
+                map_coverage=batch.get(
+                    "static_map_coverage"
+                ),
+                match_radius_m=2.25,
+                transition_penalty=0.05,
+                jump_penalty=2.0,
+            )
+
+        topology_output = future_topology_supervision_loss(
+            node_viability=_require(
+                model_output,
+                "node_viability",
+                owner="model_output",
+            ),
+            edge_viability=_require(
+                model_output,
+                "edge_viability",
+                owner="model_output",
+            ),
+            route_edge_occupancy=_require(
+                model_output,
+                "route_edge_occupancy",
+                owner="model_output",
+            ),
+            goal_prob=_require(
+                model_output,
+                "goal_prob",
+                owner="model_output",
+            ),
+            targets=future_topology_targets,
+            blocked_edge_compatibility=batch.get(
+                "static_topology_edge_compatibility"
+            ),
+            blocked_edge_mask=batch.get(
+                "static_topology_edge_mask"
+            ),
+            blocked_negative_weight=0.25,
+        )
+
+        components["topology"] = (
+            topology_output.total.to(
+                gt_xy.dtype
+            )
+        )
 
     # --------------------------------------------------------------
     # Core trajectory regression
@@ -277,14 +389,59 @@ def supervised_loss(
     components["trajectory"] = trajectory_loss(
         pred_xy,
         gt_xy,
-        winner_idx=winner_idx,
+        winner_idx=trajectory_winner_idx,
     )
 
     components["endpoint"] = endpoint_loss(
         pred_xy,
         gt_xy,
-        winner_idx,
+        endpoint_winner_idx,
     )
+
+    # --------------------------------------------------------------
+    # V3 PER-ROUTE LONGITUDINAL PROGRESS SUPERVISION
+    #
+    # Bind progress[k] to the GT projection coordinate on route[k].
+    # This prevents route/progress mode swapping under set-level losses.
+    # --------------------------------------------------------------
+
+    components["route_progress_supervision"] = (
+        gt_xy.new_zeros(())
+    )
+
+    if weights.route_progress_supervision > 0.0:
+        components["route_progress_supervision"] = (
+            route_progress_supervision_loss(
+                route_progress=_require(
+                    model_output,
+                    "route_progress",
+                    owner="model_output",
+                ),
+                route_progress_sequence=_require(
+                    model_output,
+                    "route_progress_sequence",
+                    owner="model_output",
+                ),
+                dense_route_guide=_require(
+                    model_output,
+                    "dense_route_guide",
+                    owner="model_output",
+                ),
+                route_walk_xy=_require(
+                    model_output,
+                    "route_walk_xy",
+                    owner="model_output",
+                ),
+                route_walk_s=_require(
+                    model_output,
+                    "route_walk_s",
+                    owner="model_output",
+                ),
+                future_xy=gt_xy,
+                fps=fps,
+                scale_m=5.0,
+            )
+        )
 
     # --------------------------------------------------------------
     # Mode classification
@@ -341,13 +498,76 @@ def supervised_loss(
             "goal_offset" in model_output
             and generated_targets is not None
         ):
+            # Longitudinal offsets are lane-relative coordinates.
+            # Supervise the offset only when the WTA trajectory mode
+            # selected the same lane as the GT lane target. Otherwise
+            # we would compare distances measured along different lanes.
+            goal_logits_for_offset = _require(
+                model_output,
+                "goal_logits",
+                owner="model_output",
+            )
+
+            route_batch_idx = torch.arange(
+                gt_xy.shape[0],
+                device=gt_xy.device,
+            )
+
+            winner_goal_logits = goal_logits_for_offset[
+                route_batch_idx,
+                winner_idx,
+            ]
+
+            # Last goal-logit class is MAP_EXIT.
+            num_lane_classes = winner_goal_logits.shape[-1] - 1
+
+            winner_goal_class = winner_goal_logits.argmax(
+                dim=-1
+            )
+
+            winner_goal_lane = winner_goal_logits[
+                :,
+                :num_lane_classes,
+            ].argmax(
+                dim=-1
+            )
+
+            winner_uses_lane = (
+                winner_goal_class
+                !=
+                num_lane_classes
+            )
+
+            # Longitudinal offset is meaningful only when:
+            #   1. GT endpoint has an associated retained lane,
+            #   2. winner predicts a lane rather than MAP_EXIT,
+            #   3. winner's lane equals the GT lane.
+            route_offset_mask = (
+                generated_targets.lane_goal_mask.bool()
+                &
+                winner_uses_lane
+                &
+                (
+                    winner_goal_lane
+                    ==
+                    generated_targets.goal_target
+                )
+            )
+
+            # === V3 ROUTE-PROGRESS: RETIRE LANE-LOCAL OFFSET LOSS ===
+            route_offset_mask = torch.zeros_like(
+                route_offset_mask,
+                dtype=torch.bool,
+            )
+
             components["route"] = route_loss(
                 route_anchors,
                 anchor_target,
                 winner_idx,
+                horizon_weights=(0.5, 1.0, 2.0),
                 goal_offset_pred=model_output["goal_offset"],
                 goal_offset_target=generated_targets.goal_offset_target,
-                lane_goal_mask=generated_targets.lane_goal_mask,
+                lane_goal_mask=route_offset_mask,
             )
 
         else:
@@ -355,6 +575,7 @@ def supervised_loss(
                 route_anchors,
                 anchor_target,
                 winner_idx,
+                horizon_weights=(0.5, 1.0, 2.0),
             )
 
     # --------------------------------------------------------------
@@ -501,15 +722,170 @@ def supervised_loss(
             winner_idx=winner_idx,
         )
 
-    # --------------------------------------------------------------
-    # Weighted total
-    # --------------------------------------------------------------
+    # ==============================================================
+    # V3 TOPOLOGICAL DIVERSITY + SET-LEVEL ROUTE COVERAGE
+    # ==============================================================
+    components["topo_diversity"] = gt_xy.new_zeros(())
+    components["route_coverage"] = gt_xy.new_zeros(())
+
+    if weights.topo_diversity > 0.0:
+        components["topo_diversity"] = topological_route_diversity_loss(
+            route_edge_occupancy=_require(
+                model_output,
+                "route_edge_occupancy",
+                owner="model_output",
+            ),
+            route_viability=_require(
+                model_output,
+                "route_viability",
+                owner="model_output",
+            ),
+            edge_viability=_require(
+                model_output,
+                "edge_viability",
+                owner="model_output",
+            ),
+            lane_edge_index=batch["lane_edge_index"],
+            lane_edge_mask=batch["lane_edge_mask"],
+            lane_mask=retained_lane_mask.bool(),
+        )
+
+    if weights.route_coverage > 0.0:
+        if "future_topology_targets" not in locals():
+            with torch.no_grad():
+                future_topology_targets = build_future_topology_targets(
+                    future_xy=gt_xy,
+                    lane_centerline=batch["lane_feat"][..., :2],
+                    lane_point_mask=batch["lane_point_mask"],
+                    lane_mask=retained_lane_mask.bool(),
+                    lane_edge_index=batch["lane_edge_index"],
+                    lane_edge_mask=batch["lane_edge_mask"],
+                    map_coverage=batch.get(
+                        "static_map_coverage"
+                    ),
+                    match_radius_m=2.25,
+                    transition_penalty=0.05,
+                    jump_penalty=2.0,
+                )
+
+        coverage_output = route_set_coverage_loss(
+            route_edge_occupancy=_require(
+                model_output,
+                "route_edge_occupancy",
+                owner="model_output",
+            ),
+            route_node_occupancy=_require(
+                model_output,
+                "route_node_occupancy",
+                owner="model_output",
+            ),
+            goal_prob=_require(
+                model_output,
+                "goal_prob",
+                owner="model_output",
+            ),
+            route_anchors=_require(
+                model_output,
+                "route_anchors",
+                owner="model_output",
+            ),
+            future_xy=gt_xy,
+            targets=future_topology_targets,
+            fps=5,
+            temperature=0.35,
+            edge_weight=1.0,
+            goal_weight=1.0,
+            horizon_weight=1.0,
+            horizon_scale_m=5.0,
+        )
+
+        components["route_coverage"] = (
+            coverage_output.total.to(
+                gt_xy.dtype
+            )
+        )
+
+    # ==============================================================
+    # V3 QUALITY-AWARE MODE RANKING
+    # ==============================================================
+
+    components["behavior"] = gt_xy.new_zeros(())
+    components["ranking_quality"] = gt_xy.new_zeros(())
+    components["ranking_pairwise"] = gt_xy.new_zeros(())
+
+    ranking_active = (
+        weights.behavior > 0.0
+        or
+        weights.ranking_quality > 0.0
+        or
+        weights.ranking_pairwise > 0.0
+    )
+
+    if ranking_active:
+        route_cost_for_ranking = (
+            coverage_output.mode_cost
+            if "coverage_output" in locals()
+            else None
+        )
+
+        ranking_output = mode_ranking_loss(
+            behavior_logits=_require(
+                model_output,
+                "behavior_logits",
+                owner="model_output",
+            ),
+            quality_score=_require(
+                model_output,
+                "quality_score",
+                owner="model_output",
+            ),
+            ranking_logits=_require(
+                model_output,
+                "ranking_logits",
+                owner="model_output",
+            ),
+            pred_xy=pred_xy,
+            gt_xy=gt_xy,
+            route_cost=route_cost_for_ranking,
+            fps=fps,
+        )
+
+        components["behavior"] = (
+            ranking_output.behavior.to(
+                gt_xy.dtype
+            )
+        )
+
+        components["ranking_quality"] = (
+            ranking_output.quality.to(
+                gt_xy.dtype
+            )
+        )
+
+        components["ranking_pairwise"] = (
+            ranking_output.pairwise.to(
+                gt_xy.dtype
+            )
+        )
+
+    # ==============================================================
+    # SINGLE AUTHORITATIVE WEIGHTED TOTAL
+    #
+    # Do this only after EVERY component has been constructed.
+    # ==============================================================
 
     weighted_terms = {
         "trajectory": weights.trajectory,
         "endpoint": weights.endpoint,
         "classification": weights.classification,
+        "behavior": weights.behavior,
+        "ranking_quality": weights.ranking_quality,
+        "ranking_pairwise": weights.ranking_pairwise,
         "lane": weights.lane,
+        "topology": weights.topology,
+        "topo_diversity": weights.topo_diversity,
+        "route_coverage": weights.route_coverage,
+        "route_progress_supervision": weights.route_progress_supervision,
         "route": weights.route,
         "angle": weights.angle,
         "dynamics": weights.dynamics,
@@ -523,6 +899,11 @@ def supervised_loss(
     total = pred_xy.sum() * 0.0
 
     for name, value in components.items():
+        if name not in weighted_terms:
+            raise KeyError(
+                f"No configured loss weight exists for component '{name}'."
+            )
+
         total = (
             total
             +

@@ -48,9 +48,34 @@ def endpoint_loss(
 
     gt_endpoint = gt_xy[:, -1]
 
-    return F.smooth_l1_loss(
-        pred_endpoint,
-        gt_endpoint,
-        beta=huber_beta,
-        reduction="mean",
+    # ==========================================================
+    # METRIC_ALIGNED_FDE_LONGITUDINAL
+    #
+    # Exact Euclidean FDE of the min-FDE winner.
+    # Plus explicit longitudinal terminal error.
+    # ==========================================================
+
+    residual = (
+        pred_endpoint
+        -
+        gt_endpoint
+    )
+
+    euclidean_fde = torch.linalg.vector_norm(
+        residual,
+        dim=-1,
+    ).mean()
+
+    longitudinal_fde = (
+        residual[..., 0]
+        .abs()
+        .mean()
+    )
+
+    return (
+        euclidean_fde
+        +
+        (2.0 / 3.0)
+        *
+        longitudinal_fde
     )

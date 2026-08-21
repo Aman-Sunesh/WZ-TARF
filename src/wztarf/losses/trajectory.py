@@ -142,9 +142,37 @@ def trajectory_loss(
         winner_idx,
     ]
 
-    return F.smooth_l1_loss(
-        selected,
-        gt_xy,
-        beta=huber_beta,
-        reduction="mean",
+    # ==========================================================
+    # METRIC_ALIGNED_ADE_LONGITUDINAL
+    #
+    # Exact Euclidean ADE of the min-ADE winner:
+    #   mean_t sqrt(dx^2 + dy^2)
+    #
+    # Plus explicit longitudinal MAE so the optimizer is directly
+    # pressured to repair accumulated progress error.
+    # ==========================================================
+
+    residual = (
+        selected
+        -
+        gt_xy
+    )
+
+    euclidean_ade = torch.linalg.vector_norm(
+        residual,
+        dim=-1,
+    ).mean()
+
+    longitudinal_ade = (
+        residual[..., 0]
+        .abs()
+        .mean()
+    )
+
+    return (
+        euclidean_ade
+        +
+        0.5
+        *
+        longitudinal_ade
     )

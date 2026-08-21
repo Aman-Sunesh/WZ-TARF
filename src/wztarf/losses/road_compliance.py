@@ -1,11 +1,13 @@
-"""Penalize predicted road violations only where local map geometry is reliable."""
+﻿"""Penalize predicted road violations only where local map geometry is reliable."""
 
 from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
 
-from wztarf.data.map_coverage import distance_to_lane_union
+from wztarf.data.map_coverage import (
+    distance_to_lane_union_batched,
+)
 
 
 def road_compliance_loss(
@@ -17,29 +19,10 @@ def road_compliance_loss(
     *,
     epsilon_pred_m: float = 0.25,
 ) -> torch.Tensor:
-    """Compute coverage- and reliability-aware road-compliance loss.
+    """Compute batched coverage-aware road-compliance loss.
 
-    Args:
-        pred_xy:
-            Candidate trajectories `[B, K, T, 2]`.
-
-        road_reliability_mask:
-            GT-derived reliability mask `[B, T]`.
-
-        lane_feat:
-            Batched lane geometry `[B, L, P, 8]`.
-
-        lane_point_mask:
-            Batched valid-point mask `[B, L, P]`.
-
-        lane_mask:
-            Batched valid-lane mask `[B, L]`.
-
-        epsilon_pred_m:
-            Small geometric tolerance before a road penalty begins.
-
-    Returns:
-        Scalar road-compliance loss.
+    Geometry semantics are unchanged, but predicted trajectories are processed
+    together on the accelerator rather than one batch item / lane at a time.
     """
     if pred_xy.ndim != 4 or pred_xy.shape[-1] != 2:
         raise ValueError(
@@ -61,62 +44,49 @@ def road_compliance_loss(
             "epsilon_pred_m cannot be negative."
         )
 
-    total_loss = pred_xy.sum() * 0.0
-    denominator = 0
+    points = pred_xy.reshape(
+        batch_size,
+        num_modes * future_steps,
+        2,
+    )
 
-    for batch_index in range(batch_size):
-        reliable = road_reliability_mask[
-            batch_index
-        ].bool()
+    distance = distance_to_lane_union_batched(
+        points,
+        lane_feat,
+        lane_point_mask,
+        lane_mask,
+    ).reshape(
+        batch_size,
+        num_modes,
+        future_steps,
+    )
 
-        valid_steps = int(
-            reliable.sum().item()
-        )
+    penalty = F.relu(
+        distance
+        -
+        epsilon_pred_m
+    ).square()
 
-        if valid_steps == 0:
-            continue
-
-        points = pred_xy[
-            batch_index
-        ].reshape(
-            num_modes * future_steps,
-            2,
-        )
-
-        distance = distance_to_lane_union(
-            points,
-            lane_feat[batch_index],
-            lane_point_mask[batch_index],
-            lane_mask[batch_index],
-        ).reshape(
-            num_modes,
-            future_steps,
-        )
-
-        penalty = F.relu(
-            distance
-            -
-            epsilon_pred_m
-        ).square()
-
-        mask = reliable.unsqueeze(0).expand(
+    mask = (
+        road_reliability_mask.bool()
+        .unsqueeze(1)
+        .expand(
+            -1,
             num_modes,
             -1,
         )
+    )
 
-        total_loss = (
-            total_loss
-            +
-            penalty[mask].sum()
-        )
+    numerator = (
+        penalty
+        *
+        mask.to(penalty.dtype)
+    ).sum()
 
-        denominator += (
-            num_modes
-            *
-            valid_steps
-        )
+    denominator = (
+        mask.sum()
+        .clamp_min(1)
+        .to(penalty.dtype)
+    )
 
-    if denominator == 0:
-        return pred_xy.sum() * 0.0
-
-    return total_loss / float(denominator)
+    return numerator / denominator

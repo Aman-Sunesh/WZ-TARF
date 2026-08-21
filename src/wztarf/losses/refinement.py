@@ -58,10 +58,15 @@ def refinement_loss(
         winner_idx,
     ]
 
+    # The final trajectory loss already supervises coarse + refinement.
+    # Detach the coarse prediction here so this auxiliary objective
+    # specifically trains the local refiner to correct the current
+    # coarse trajectory instead of duplicating the full regression
+    # gradient through the coarse decoder.
     target_delta = (
         gt_xy
         -
-        selected_coarse
+        selected_coarse.detach()
     )
 
     return F.smooth_l1_loss(
