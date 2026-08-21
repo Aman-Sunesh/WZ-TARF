@@ -14,6 +14,15 @@ import torch
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 
+from wztarf.data.future_topology_targets import (
+    build_future_topology_targets,
+)
+from wztarf.data.map_coverage import (
+    build_map_coverage_mask_batched,
+)
+from wztarf.losses.route_set_objectives import (
+    route_set_coverage_loss,
+)
 from wztarf.pretraining.future_contrastive import (
     build_false_negative_mask,
     future_contrastive_loss,
@@ -39,11 +48,17 @@ from wztarf.training.checkpointing import (
 
 @dataclass(frozen=True)
 class PretrainingWeights:
-    """Weights for the three self-supervised Phase A objectives."""
+    """Weights for the five V3 Phase-A objectives."""
 
     masked_reconstruction: float = 1.0
     future_contrastive: float = 1.0
+
+    # WZ-derived objective. Must remain zero for static No-WZ.
     topology: float = 1.0
+
+    # Future + permanent-map objectives. Legal for Full and No-WZ.
+    route_coverage: float = 0.5
+    route_progress: float = 0.5
 
     def __post_init__(self) -> None:
         """Reject negative objective weights."""
@@ -620,6 +635,276 @@ class Pretrainer:
                 ]
             )
 
+        # ==============================================================
+        # V3 PHASE-A ROUTE SET + PROGRESS SUPERVISION
+        #
+        # IMPORTANT:
+        # Targets below use only future_xy + permanent lane geometry.
+        # They never use wz_feat, therefore the same objectives are valid
+        # for the Full model and the static No-WZ ablation.
+        # ==============================================================
+
+        if (
+            self.weights.route_coverage > 0
+            or self.weights.route_progress > 0
+        ):
+            route_node_occupancy = _require(
+                output,
+                "route_node_occupancy",
+                owner="pretraining output",
+            )
+
+            route_edge_occupancy = _require(
+                output,
+                "route_edge_occupancy",
+                owner="pretraining output",
+            )
+
+            route_goal_prob = _require(
+                output,
+                "route_goal_prob",
+                owner="pretraining output",
+            )
+
+            route_anchors = _require(
+                output,
+                "route_anchors",
+                owner="pretraining output",
+            )
+
+            # ----------------------------------------------------------
+            # Future -> permanent-map route pseudo-target.
+            #
+            # Use the original unmasked map from the batch for TARGETS.
+            # lane_feat[..., :2] is the permanent lane XY geometry.
+            # ----------------------------------------------------------
+
+            permanent_lane_xy = batch[
+                "lane_feat"
+            ][
+                ...,
+                :2,
+            ].float()
+
+            map_coverage = build_map_coverage_mask_batched(
+                points=batch["future_xy"],
+                lane_feat=batch["lane_feat"],
+                lane_point_mask=batch["lane_point_mask"],
+                lane_mask=batch["lane_mask"],
+                margin_m=2.25,
+            )
+
+            route_targets = build_future_topology_targets(
+                future_xy=batch["future_xy"],
+                lane_centerline=permanent_lane_xy,
+                lane_point_mask=batch["lane_point_mask"],
+                lane_mask=batch["lane_mask"],
+                lane_edge_index=batch["lane_edge_index"],
+                lane_edge_mask=batch["lane_edge_mask"],
+                map_coverage=map_coverage,
+                match_radius_m=2.25,
+                transition_penalty=1.0,
+                jump_penalty=4.0,
+            )
+
+            # ----------------------------------------------------------
+            # Smooth best-of-six route-set coverage.
+            # ----------------------------------------------------------
+
+            if self.weights.route_coverage > 0:
+                coverage = route_set_coverage_loss(
+                    route_edge_occupancy=route_edge_occupancy,
+                    route_node_occupancy=route_node_occupancy,
+                    goal_prob=route_goal_prob,
+                    route_anchors=route_anchors,
+                    future_xy=batch["future_xy"],
+                    targets=route_targets,
+                    fps=int(self.model.config.fps),
+                    temperature=0.35,
+                    edge_weight=1.0,
+                    goal_weight=1.0,
+                    horizon_weight=1.0,
+                    horizon_scale_m=5.0,
+                )
+
+                components["route_coverage"] = coverage.total
+                components["route_coverage_edge"] = coverage.edge
+                components["route_coverage_goal"] = coverage.goal
+                components["route_coverage_horizon"] = coverage.horizon
+
+                total = (
+                    total
+                    +
+                    self.weights.route_coverage
+                    *
+                    components["route_coverage"]
+                )
+
+            # ----------------------------------------------------------
+            # Explicit monotonic 1/3/5-second progress supervision.
+            #
+            # route_anchors are generated FROM route_progress, so this
+            # directly trains the s1/s3/s5 monotonic progress mechanism.
+            # ----------------------------------------------------------
+
+            if self.weights.route_progress > 0:
+                # ======================================================
+                # TRUE SCALAR ROUTE-PROGRESS SUPERVISION
+                #
+                # The route-progress head predicts monotonic traveled
+                # distances s1, s3, s5 along each route hypothesis.
+                #
+                # Supervise those scalar distances against cumulative
+                # traveled distance of the realized future trajectory.
+                #
+                # This is intentionally distinct from route coverage's
+                # horizon term, which supervises XY route anchors.
+                # ======================================================
+
+                predicted_progress = _require(
+                    output,
+                    "route_progress",
+                    owner="pretraining output",
+                ).float()
+
+                future_xy = batch[
+                    "future_xy"
+                ].float()
+
+                # Ego is at (0,0) at prediction time. Include distance
+                # from the origin to the first future observation.
+                future_delta = torch.zeros_like(
+                    future_xy
+                )
+
+                future_delta[
+                    :,
+                    0,
+                ] = future_xy[
+                    :,
+                    0,
+                ]
+
+                future_delta[
+                    :,
+                    1:,
+                ] = (
+                    future_xy[
+                        :,
+                        1:,
+                    ]
+                    -
+                    future_xy[
+                        :,
+                        :-1,
+                    ]
+                )
+
+                cumulative_progress = torch.cumsum(
+                    torch.linalg.vector_norm(
+                        future_delta,
+                        dim=-1,
+                    ),
+                    dim=1,
+                )
+
+                fps = int(
+                    self.model.config.fps
+                )
+
+                horizon_indices = torch.tensor(
+                    (
+                        min(
+                            fps * 1 - 1,
+                            future_xy.shape[1] - 1,
+                        ),
+                        min(
+                            fps * 3 - 1,
+                            future_xy.shape[1] - 1,
+                        ),
+                        min(
+                            fps * 5 - 1,
+                            future_xy.shape[1] - 1,
+                        ),
+                    ),
+                    dtype=torch.long,
+                    device=future_xy.device,
+                )
+
+                gt_progress = cumulative_progress.index_select(
+                    1,
+                    horizon_indices,
+                )
+
+                progress_error = torch.abs(
+                    predicted_progress
+                    -
+                    gt_progress[
+                        :,
+                        None,
+                        :,
+                    ]
+                )
+
+                horizon_weights = torch.tensor(
+                    (
+                        0.5,
+                        1.0,
+                        2.0,
+                    ),
+                    dtype=progress_error.dtype,
+                    device=progress_error.device,
+                )
+
+                progress_scale_m = 5.0
+
+                mode_cost = (
+                    (
+                        progress_error
+                        /
+                        progress_scale_m
+                    )
+                    *
+                    horizon_weights[
+                        None,
+                        None,
+                        :,
+                    ]
+                ).sum(
+                    dim=-1
+                ) / horizon_weights.sum()
+
+                tau = 0.35
+
+                progress_per_sample = (
+                    -tau
+                    *
+                    (
+                        torch.logsumexp(
+                            -mode_cost / tau,
+                            dim=1,
+                        )
+                        -
+                        math.log(
+                            mode_cost.shape[1]
+                        )
+                    )
+                )
+
+                components[
+                    "route_progress"
+                ] = progress_per_sample.mean()
+
+                total = (
+                    total
+                    +
+                    self.weights.route_progress
+                    *
+                    components[
+                        "route_progress"
+                    ]
+                )
+
         return (
             total,
             components,
@@ -770,7 +1055,6 @@ class Pretrainer:
                 )
 
             num_batches += 1
-
             if (
                 batch_index == 1
                 or batch_index % 50 == 0
