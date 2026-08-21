@@ -121,6 +121,7 @@ class TemporaryTopologyAdapter(nn.Module):
         *,
         lane_xy: torch.Tensor,
         lane_heading: torch.Tensor,
+        topology_mode: str = "workzone",
     ) -> dict[str, torch.Tensor]:
         """Return WZ-adapted lane states and soft topology scores."""
         batch_size, num_lanes, _ = lane_states.shape
@@ -144,30 +145,168 @@ class TemporaryTopologyAdapter(nn.Module):
                 "lane_heading must have shape [B, L, 2]."
             )
     
-        wz_nodes = wz_context[:, None].expand(
-            -1,
-            num_lanes,
-            -1,
-        )
+        # ==============================================================
+        # V3 EXPLICIT TOPOLOGY ABLATION
+        #
+        # workzone:
+        #     learned WZ-conditioned temporary graph
+        #
+        # static:
+        #     permanent map graph with valid nodes/edges assigned
+        #     viability 1.0.  No WorkZone information participates.
+        # ==============================================================
+        topology_mode = str(
+            topology_mode
+        ).lower()
 
-        node_viability = torch.sigmoid(
-            self.node_viability(
-                torch.cat(
-                    (
-                        lane_states,
-                        wz_nodes,
-                    ),
-                    dim=-1,
+        if topology_mode not in {
+            "workzone",
+            "static",
+        }:
+            raise ValueError(
+                "topology_mode must be 'workzone' or 'static'."
+            )
+
+        if topology_mode == "workzone":
+            wz_nodes = wz_context[:, None].expand(
+                -1,
+                num_lanes,
+                -1,
+            )
+
+            node_viability = torch.sigmoid(
+                self.node_viability(
+                    torch.cat(
+                        (
+                            lane_states,
+                            wz_nodes,
+                        ),
+                        dim=-1,
+                    )
+                )
+            ).squeeze(-1)
+
+            node_viability = (
+                node_viability
+                *
+                lane_mask.to(
+                    node_viability.dtype
                 )
             )
-        ).squeeze(-1)
 
-        node_viability = (
-            node_viability
-            *
-            lane_mask.to(
-                node_viability.dtype
+        else:
+            node_viability = lane_mask.to(
+                lane_states.dtype
             )
+
+        # Build one flattened edge list for the entire batch and reuse it for
+        # edge viability and every topology layer.  This replaces repeated
+        # Python loops and repeated edge extraction/remapping.
+        src = lane_edge_index[:, 0].long()
+        dst = lane_edge_index[:, 1].long()
+        valid = lane_edge_mask.bool().clone()
+        valid &= (src >= 0) & (dst >= 0) & (src < num_lanes) & (dst < num_lanes)
+        safe_src = src.clamp(0, max(num_lanes - 1, 0))
+        safe_dst = dst.clamp(0, max(num_lanes - 1, 0))
+        valid &= lane_mask.gather(1, safe_src) & lane_mask.gather(1, safe_dst)
+
+        batch_grid = torch.arange(
+            batch_size,
+            device=lane_states.device,
+        )[:, None].expand(batch_size, num_edges)
+        edge_slot_grid = torch.arange(
+            num_edges,
+            device=lane_states.device,
+        )[None, :].expand(batch_size, num_edges)
+
+        edge_batch = batch_grid[valid]
+        edge_slot = edge_slot_grid[valid]
+        local_src = src[valid]
+        local_dst = dst[valid]
+        edge_type = lane_edge_type.long()[valid]
+        global_src = edge_batch * num_lanes + local_src
+        global_dst = edge_batch * num_lanes + local_dst
+
+        flat_lane_states = lane_states.reshape(batch_size * num_lanes, self.d_model)
+        flat_lane_xy = lane_xy.reshape(batch_size * num_lanes, 2)
+        flat_lane_heading = lane_heading.reshape(batch_size * num_lanes, 2)
+
+        edge_embedding = self.edge_type_embedding(edge_type)
+        relation = lane_edge_relation_features(
+            flat_lane_xy.float(),
+            flat_lane_heading.float(),
+            global_src,
+            global_dst,
+        )
+        relation_embedding = self.relation_encoder(relation)
+        if topology_mode == "workzone":
+            edge_wz = wz_context[
+                edge_batch
+            ]
+
+            edge_input = torch.cat(
+                (
+                    flat_lane_states[global_src],
+                    flat_lane_states[global_dst],
+                    relation_embedding,
+                    edge_embedding,
+                    edge_wz,
+                ),
+                dim=-1,
+            )
+
+            gate_valid = torch.sigmoid(
+                self.edge_viability(
+                    edge_input
+                )
+            ).squeeze(
+                -1
+            )
+
+        else:
+            # Permanent graph: every represented valid edge is viable.
+            gate_valid = torch.ones(
+                edge_batch.shape[0],
+                dtype=lane_states.dtype,
+                device=lane_states.device,
+            )
+
+        # === WZTARF V3 EFFECTIVE TEMPORARY EDGE VIABILITY ===
+        #
+        # The learned edge gate is explicitly conditioned on the WorkZone
+        # context.  In V3 the conditioning context is formed only at the
+        # topology interface from independently encoded WZ and worker streams.
+        #
+        # A transition is useful only if both incident lane nodes remain
+        # viable.  Averaging source/destination viability keeps the initial
+        # message scale comparable to V2 while making closures downstream of
+        # an otherwise viable source suppress the transition as well.
+        src_node_viability = node_viability[
+            edge_batch,
+            local_src,
+        ]
+        dst_node_viability = node_viability[
+            edge_batch,
+            local_dst,
+        ]
+
+        incident_viability = 0.5 * (
+            src_node_viability
+            +
+            dst_node_viability
+        )
+
+        effective_gate_valid = (
+            gate_valid.to(incident_viability.dtype)
+            *
+            incident_viability
+        )
+
+        edge_gate_raw = torch.zeros(
+            batch_size,
+            num_edges,
+            dtype=lane_states.dtype,
+            device=lane_states.device,
         )
 
         edge_gate = torch.zeros(
@@ -177,324 +316,59 @@ class TemporaryTopologyAdapter(nn.Module):
             device=lane_states.device,
         )
 
+        # Every [batch, edge_slot] pair is unique, so indexed assignment is
+        # deterministic even when several edges share a source/destination.
+        edge_gate_raw[
+            edge_batch,
+            edge_slot,
+        ] = gate_valid.to(edge_gate_raw.dtype)
+
+        edge_gate[
+            edge_batch,
+            edge_slot,
+        ] = effective_gate_valid.to(edge_gate.dtype)
+
         h = lane_states
-
-        # Edge viability is computed once from the initial lane encoding.
-        for b in range(
-            batch_size
-        ):
-            valid_edges = torch.nonzero(
-                lane_edge_mask[b].bool(),
-                as_tuple=False,
-            ).flatten()
-
-            if valid_edges.numel() == 0:
-                continue
-
-            src = lane_edge_index[
-                b,
-                0,
-                valid_edges,
-            ].long()
-
-            dst = lane_edge_index[
-                b,
-                1,
-                valid_edges,
-            ].long()
-
-            edge_type = lane_edge_type[
-                b,
-                valid_edges,
-            ].long()
-
-            valid = (
-                (src >= 0)
-                &
-                (dst >= 0)
-                &
-                (src < num_lanes)
-                &
-                (dst < num_lanes)
-            )
-
-            src = src[
-                valid
-            ]
-            dst = dst[
-                valid
-            ]
-            edge_type = edge_type[
-                valid
-            ]
-            valid_edges = valid_edges[
-                valid
-            ]
-
-            if src.numel() == 0:
-                continue
-
-            node_valid = (
-                lane_mask[b, src]
-                &
-                lane_mask[b, dst]
-            )
-
-            src = src[
-                node_valid
-            ]
-            dst = dst[
-                node_valid
-            ]
-            edge_type = edge_type[
-                node_valid
-            ]
-            valid_edges = valid_edges[
-                node_valid
-            ]
-
-            if src.numel() == 0:
-                continue
-
-            edge_embedding = self.edge_type_embedding(
-                edge_type
-            )
-
-            relation = lane_edge_relation_features(
-                lane_xy[b],
-                lane_heading[b],
-                src,
-                dst,
-            )
-            
-            relation_embedding = self.relation_encoder(
-                relation
-            )
-
-            wz = wz_context[
-                b
-            ][None].expand(
-                src.shape[0],
-                -1,
-            )
-
-            edge_input = torch.cat(
-                (
-                    lane_states[
-                        b,
-                        src,
-                    ],
-                    lane_states[
-                        b,
-                        dst,
-                    ],
-                    relation_embedding,
-                    edge_embedding,
-                    wz,
-                ),
-                dim=-1,
-)
-
-            gate = torch.sigmoid(
-                self.edge_viability(
-                    edge_input
-                )
-            ).squeeze(-1)
-
-            edge_gate[
-                b,
-                valid_edges,
-            ] = gate.to(
-                dtype=edge_gate.dtype
-            )
+        flat_node_viability = node_viability.reshape(batch_size * num_lanes)
 
         for message_layer, update_layer, norm in zip(
             self.message_layers,
             self.update_layers,
             self.norms,
         ):
-            updated_batches = []
-
-            for b in range(
-                batch_size
-            ):
-                aggregate = torch.zeros_like(
-                    h[b]
-                )
-
-                count = torch.zeros(
-                    num_lanes,
-                    1,
-                    dtype=h.dtype,
-                    device=h.device,
-                )
-
-                valid_edges = torch.nonzero(
-                    lane_edge_mask[b].bool(),
-                    as_tuple=False,
-                ).flatten()
-
-                if valid_edges.numel() > 0:
-                    src = lane_edge_index[
-                        b,
-                        0,
-                        valid_edges,
-                    ].long()
-
-                    dst = lane_edge_index[
-                        b,
-                        1,
-                        valid_edges,
-                    ].long()
-
-                    edge_type = lane_edge_type[
-                        b,
-                        valid_edges,
-                    ].long()
-
-                    valid = (
-                        (src >= 0)
-                        &
-                        (dst >= 0)
-                        &
-                        (src < num_lanes)
-                        &
-                        (dst < num_lanes)
-                    )
-
-                    src = src[
-                        valid
-                    ]
-                    dst = dst[
-                        valid
-                    ]
-                    edge_type = edge_type[
-                        valid
-                    ]
-                    valid_edges = valid_edges[
-                        valid
-                    ]
-
-                    if src.numel() > 0:
-                        node_valid = (
-                            lane_mask[b, src]
-                            &
-                            lane_mask[b, dst]
-                        )
-
-                        src = src[
-                            node_valid
-                        ]
-                        dst = dst[
-                            node_valid
-                        ]
-                        edge_type = edge_type[
-                            node_valid
-                        ]
-                        valid_edges = valid_edges[
-                            node_valid
-                        ]
-
-                    if src.numel() > 0:
-                        edge_embedding = self.edge_type_embedding(
-                            edge_type
-                        )
-
-                        message = message_layer(
-                            torch.cat(
-                                (
-                                    h[
-                                        b,
-                                        src,
-                                    ],
-                                    edge_embedding,
-                                ),
-                                dim=-1,
-                            )
-                        )
-
-                        gate = (
-                            edge_gate[
-                                b,
-                                valid_edges,
-                            ]
-                            *
-                            node_viability[
-                                b,
-                                src,
-                            ]
-                        )
-
-                        message = (
-                            message
-                            *
-                            gate[:, None]
-                        )
-
-                        # AMP can produce FP16 messages while the graph
-                        # accumulation buffer remains FP32. index_add_ requires
-                        # source and destination to have identical dtypes.
-                        message = message.to(
-                            dtype=aggregate.dtype
-                        )
-
-                        aggregate.index_add_(
-                            0,
-                            dst,
-                            message,
-                        )
-
-                        count.index_add_(
-                            0,
-                            dst,
-                            torch.ones(
-                                dst.shape[0],
-                                1,
-                                dtype=h.dtype,
-                                device=h.device,
-                            ),
-                        )
-
-                aggregate = aggregate / count.clamp_min(
-                    1.0
-                )
-
-                update = update_layer(
-                    torch.cat(
-                        (
-                            h[b],
-                            aggregate,
-                        ),
-                        dim=-1,
-                    )
-                )
-
-                new_h = norm(
-                    h[b]
-                    +
-                    update
-                )
-
-                new_h = (
-                    new_h
-                    *
-                    lane_mask[
-                        b,
-                        :,
-                        None,
-                    ].to(
-                        new_h.dtype
-                    )
-                )
-
-                updated_batches.append(
-                    new_h
-                )
-
-            h = torch.stack(
-                updated_batches,
-                dim=0,
+            flat_h = h.reshape(batch_size * num_lanes, self.d_model)
+            message = message_layer(
+                torch.cat((flat_h[global_src], edge_embedding), dim=-1)
             )
+            # effective_gate_valid already incorporates both source and
+            # destination node viability.
+            message_gate = effective_gate_valid
+            message = (message * message_gate[:, None]).to(flat_h.dtype)
+
+            aggregate = torch.zeros_like(flat_h)
+            count = torch.zeros(
+                batch_size * num_lanes,
+                1,
+                dtype=flat_h.dtype,
+                device=flat_h.device,
+            )
+            aggregate.index_add_(0, global_dst, message)
+            count.index_add_(
+                0,
+                global_dst,
+                torch.ones(
+                    global_dst.shape[0],
+                    1,
+                    dtype=count.dtype,
+                    device=count.device,
+                ),
+            )
+            aggregate = aggregate / count.clamp_min(1.0)
+            aggregate = aggregate.reshape(batch_size, num_lanes, self.d_model)
+
+            update = update_layer(torch.cat((h, aggregate), dim=-1))
+            h = norm(h + update)
+            h = h * lane_mask[..., None].to(h.dtype)
 
         pooling_score = node_viability.masked_fill(
             ~lane_mask.bool(),
@@ -538,4 +412,5 @@ class TemporaryTopologyAdapter(nn.Module):
             "lane_context": context,
             "node_viability": node_viability,
             "edge_viability": edge_gate,
+            "edge_viability_raw": edge_gate_raw,
         }
