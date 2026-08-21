@@ -1,39 +1,19 @@
-"""Measure peak CUDA memory allocated during inference."""
+"""Peak CUDA memory measurement."""
 
 from __future__ import annotations
 
 import torch
 
 
-def reset_peak_gpu_memory(
-    device: str | torch.device | None = None,
-) -> None:
-    """Reset CUDA peak-memory statistics before an inference measurement."""
+def reset_peak_gpu_memory(device: str | torch.device | None = None) -> None:
+    """Reset CUDA peak allocated-memory statistics when CUDA is available."""
     if not torch.cuda.is_available():
         return
-
-    if device is None:
-        device = torch.cuda.current_device()
-
-    torch.cuda.reset_peak_memory_stats(
-        device
-    )
+    torch.cuda.reset_peak_memory_stats(device)
 
 
-def peak_gpu_memory_mb(
-    device: str | torch.device | None = None,
-) -> float:
-    """Return peak CUDA memory allocated since the last reset, in MiB."""
+def peak_gpu_memory_mb(device: str | torch.device | None = None) -> float:
+    """Return peak allocated CUDA memory in MiB, or NaN on CPU."""
     if not torch.cuda.is_available():
         return float("nan")
-
-    if device is None:
-        device = torch.cuda.current_device()
-
-    return (
-        torch.cuda.max_memory_allocated(
-            device
-        )
-        /
-        (1024.0 ** 2)
-    )
+    return torch.cuda.max_memory_allocated(device) / (1024.0 ** 2)
