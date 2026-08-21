@@ -78,7 +78,8 @@ minFDE6 = 2.009524822
 
 The complete WZ-TARF training pipeline is:
 
-```textPhase A
+```text
+Phase A
   Representation pretraining
         ↓
 Phase B
