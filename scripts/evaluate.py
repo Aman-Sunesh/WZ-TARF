@@ -10,7 +10,11 @@ from typing import Any
 import torch
 from torch.utils.data import DataLoader
 
-from wztarf.data import WorkZoneDataset, collate_workzone_batch
+from wztarf.data import (
+    WorkZoneDataset,
+    collate_workzone_batch,
+    collate_workzone_fixed,
+)
 from wztarf.evaluation import evaluate_checkpoint
 from wztarf.metrics.efficiency import (
     inference_latency_ms,
@@ -163,6 +167,7 @@ def main() -> None:
     seed_all(
         seed
     )
+    torch.set_float32_matmul_precision("high")
 
     device = _device_from_arg(
         args.device
@@ -211,8 +216,14 @@ def main() -> None:
     dataset = WorkZoneDataset(
         roots=roots,
         split=split,
-        validate=True,
+        validate=bool(data_config.get("validate_samples", False)),
         include_source_path=True,
+    )
+
+    collate_fn = (
+        collate_workzone_fixed
+        if bool(data_config.get("fixed_collate", True))
+        else collate_workzone_batch
     )
 
     dataloader = DataLoader(
@@ -229,7 +240,7 @@ def main() -> None:
             )
             and device.type == "cuda"
         ),
-        collate_fn=collate_workzone_batch,
+        collate_fn=collate_fn,
     )
 
     model = WZTARF(
@@ -283,7 +294,7 @@ def main() -> None:
         shuffle=False,
         num_workers=0,
         pin_memory=False,
-        collate_fn=collate_workzone_batch,
+        collate_fn=collate_fn,
     )
 
     latency_batch = next(
