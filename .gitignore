@@ -45,3 +45,6 @@ outputs/*
 # Temporary files
 *.tmp
 *.log
+
+# The small frozen A20 policy is intentionally versioned as run proof.
+!artifacts/best_wz/a20_policy.pt
