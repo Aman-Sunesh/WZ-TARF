@@ -1,22 +1,41 @@
 # WZ-TARF
 
-**WorkZone-Conditioned Topology-Adaptive Route Forecaster**
+**WorkZone-Conditioned Topology-Adaptive Route Forecasting**
 
-WZ-TARF predicts six possible 5-second ego trajectories in road work zones. The model uses ego motion, controls, gaze, nearby agents, lane geometry, and temporary WorkZone structure.
+WZ-TARF is a multimodal trajectory prediction model designed for driving through road WorkZones.
 
-This repository has two goals:
+Given the recent motion of the ego vehicle together with scene information such as lane geometry, nearby agents, vehicle controls, driver gaze, workers, and temporary WorkZone structure, WZ-TARF predicts **6 possible trajectories for the next 5 seconds**.
 
-1. provide a clean, readable path for **WZ vs No-WZ training from scratch**; and
-2. preserve the exact evidence for the strongest research run without mixing experimental scripts into the public code path.
+## Overview
+
+Most trajectory prediction methods are designed around normal road geometry. WorkZones are different: lanes may temporarily shift, merge, close, or change their normal connectivity.
+
+WZ-TARF is designed to explicitly account for these temporary changes.
+
+The model combines:
+
+- ego-vehicle motion history
+- nearby-agent motion
+- lane geometry and lane connectivity
+- vehicle controls
+- driver gaze
+- WorkZone geometry
+- worker information
+
+The final model produces **K = 6** possible future trajectories.
 
 ## Forecasting setup
 
-- history: 10 frames at 5 Hz = 2 seconds
-- future: 25 frames at 5 Hz = 5 seconds
-- output modes: K = 6
-- main metrics: exact `minADE6` and `minFDE6`
+| Setting | Value |
+|---|---:|
+| Observation history | 2 s |
+| Prediction horizon | 5 s |
+| Sampling rate | 5 Hz |
+| History frames | 10 |
+| Future frames | 25 |
+| Predicted trajectories | 6 |
 
-Canonical final split sizes:
+### Dataset split
 
 | Split | Samples | Participants |
 |---|---:|---:|
@@ -24,146 +43,206 @@ Canonical final split sizes:
 | Validation | 2,119 | 3 |
 | Test | 2,233 | 3 |
 
-## Best frozen result
+The participant sets are disjoint across train, validation, and test.
 
-The strongest saved exact-K=6 official TEST result is:
+## Results
 
-| Model | minADE6 | minFDE6 |
+The final locked WZ-TARF model achieves:
+
+| Model | minADE₆ ↓ | minFDE₆ ↓ |
 |---|---:|---:|
-| WZ-TARF + frozen A20 policy | **1.0413** | **2.0137** |
+| **WZ-TARF** | **1.0377 m** | **2.0095 m** |
 
-The exact values are `1.0413196087 / 2.0136578083`. The A20 policy was trained on development data, selected using the internal holdout, and applied to TEST without refitting or TEST-time selection.
+Exact result:
 
-Proof files are under `artifacts/best_wz/`. Run:
-
-```bash
-python scripts/verify_best.py
+```text
+minADE6 = 1.037688971
+minFDE6 = 2.009524822
 ```
 
-This verifies the saved policy hash, selected epoch, feature dimension, and frozen metrics JSON. See `docs/REPRODUCIBILITY.md` for the distinction between proof reproduction and fresh retraining.
+`minADE₆` measures the average trajectory error of the best of the six predictions.
+
+`minFDE₆` measures the final-position error at 5 seconds of the best of the six predictions.
+
+### Performance by horizon
+
+| Horizon | minADE₆ ↓ | minFDE₆ ↓ |
+|---|---:|---:|
+| 1 s | 0.3018 | 0.2716 |
+| 2 s | 0.3839 | 0.4445 |
+| 3 s | 0.5343 | 0.8539 |
+| 4 s | 0.7546 | 1.3911 |
+| 5 s | **1.0377** | **2.0095** |
+
+## Model pipeline
+
+The complete WZ-TARF training pipeline is:
+
+```text
+Phase A
+  Representation pretraining
+        ↓
+Phase B
+  Base trajectory predictor
+        ↓
+Direct-K6 trajectory generator
+        ↓
+Anchor calibration
+        ↓
+Native-K64 intermediate adaptation
+        ↓
+A3:F1 K=6 refinement
+        ↓
+Longitudinal and lateral calibration
+        ↓
+Final WZ-TARF predictor
+```
+
+The K64 stage is used only as an intermediate training step.  
+**All reported final results use exactly 6 predicted trajectories.**
 
 ## Installation
 
-Python 3.10+ is required.
+Python 3.10 or newer is recommended.
 
 ```bash
-python -m venv .venv
-# Windows: .venv\Scripts\activate
-# Linux/macOS: source .venv/bin/activate
+git clone https://github.com/Aman-Sunesh/WZ-TARF.git
+cd WZ-TARF
 
+python -m venv .venv
+```
+
+Activate the environment:
+
+### Windows
+
+```bash
+.venv\Scripts\activate
+```
+
+### Linux / macOS
+
+```bash
+source .venv/bin/activate
+```
+
+Install the package:
+
+```bash
+pip install -e .
+```
+
+For development dependencies:
+
+```bash
 pip install -e ".[dev]"
 ```
 
-## Verify the processed dataset
+## Dataset
 
-The code expects the final serialized `.pt` samples. Dataset roots are passed at runtime; no machine-specific path is stored in the repository.
+The dataset itself is not included in this repository.
+
+WZ-TARF expects the processed trajectory samples as serialized `.pt` files.
+
+You can verify a processed dataset with:
 
 ```bash
 python scripts/verify_dataset.py \
   --data-roots "/path/to/processed_final_lap1,/path/to/processed_final_lap2"
 ```
 
-For the slower participant-disjoint audit:
+## Training
 
-```bash
-python scripts/verify_dataset.py \
-  --data-roots "/path/to/processed_final_lap1,/path/to/processed_final_lap2" \
-  --check-participants
-```
-
-## Train the complete fresh pipeline
-
-The canonical entry point now trains the **entire** research recipe. It does not load `artifacts/best_wz` or any historical intermediate checkpoint.
-
-```text
-Phase A -> Phase B -> Direct-K6 generator -> strip longitudinal repair
-        -> anchor-only calibration -> native-K64 intermediate adaptation (2+4)
-        -> A3:F1 x 1 epoch -> fixed12 -> endpoint-zero -> A20 -> frozen bundle
-```
-
-WZ only:
+### Full WZ-TARF
 
 ```bash
 python scripts/train_full_pipeline.py \
   --config configs/wz.yaml \
   --data-roots "/path/to/processed_final_lap1,/path/to/processed_final_lap2" \
-  --run-id canonical_fresh_wz \
-  --device cuda \
-  --open-test
+  --run-id wz_tarf \
+  --device cuda
 ```
 
-No-WZ only uses the identical stage graph:
+### No-WorkZone baseline
 
 ```bash
 python scripts/train_full_pipeline.py \
   --config configs/no_wz.yaml \
   --data-roots "/path/to/processed_final_lap1,/path/to/processed_final_lap2" \
-  --run-id canonical_fresh_no_wz \
-  --device cuda \
-  --open-test
+  --run-id no_wz \
+  --device cuda
 ```
 
-For the paper comparison, run both sequentially:
+The No-WZ configuration uses the same overall training pipeline but replaces WorkZone-conditioned topology with the static road topology.
+
+## Test evaluation
+
+TEST evaluation is intentionally separated from model development.
+
+To evaluate the final frozen model:
 
 ```bash
-python scripts/train_comparison.py \
+python scripts/train_full_pipeline.py \
+  --config configs/wz.yaml \
   --data-roots "/path/to/processed_final_lap1,/path/to/processed_final_lap2" \
+  --run-id wz_tarf \
   --device cuda \
+  --resume-existing \
   --open-test
 ```
 
-`configs/no_wz.yaml` removes explicit WZ polygon/topology conditioning and keeps the separately observed worker stream. The late A3 auxiliary pass also forces `topology=0` and `wz_geometry=0` for No-WZ, while every other canonical stage/hyperparameter is shared.
-
-`--open-test` is deliberately optional. Without it, TEST is never constructed. For a single-condition `train_full_pipeline.py` run, TEST is constructed only after that final bundle is frozen. For `train_comparison.py`, **both WZ and No-WZ are frozen before either TEST result is revealed**, then each frozen bundle is evaluated once. `--resume-existing` resumes only artifacts produced under the requested run ID; it never searches `artifacts/best_wz`.
-
-The historical WZ target on the same final dataset is `1.0413196087 / 2.0136578083`. Fresh training is stochastic, so this is a regression target rather than a bit-for-bit guarantee.
-
-## Evaluate a frozen final bundle
+A frozen final bundle can also be evaluated with:
 
 ```bash
 python scripts/evaluate_final_pipeline.py \
-  --bundle checkpoints/canonical_fresh_wz/final_pipeline_bundle.pt \
+  --bundle checkpoints/wz_tarf/final_pipeline_bundle.pt \
   --data-roots "/path/to/processed_final_lap1,/path/to/processed_final_lap2" \
   --split test \
   --device cuda
 ```
 
-The older `scripts/train.py` and `scripts/evaluate.py` remain available for Phase-B-only diagnostics; they are **not** the canonical full-paper reproduction path.
-
-## Repository layout
+## Repository structure
 
 ```text
-configs/                  canonical WZ / No-WZ experiment definitions
-scripts/                  small public entry points
-src/wztarf/data/          dataset loading and schema checks
-src/wztarf/models/        model components
-src/wztarf/losses/        supervised objectives
-src/wztarf/training/      training loops and checkpoints
-src/wztarf/evaluation/    exact metrics and report generation
-src/wztarf/postprocess/   frozen A20 post-processing policy
-artifacts/best_wz/        best-run proof files and hashes
-docs/                     model, data, and reproducibility notes
-tests/                    unit and forward/backward tests
+WZ-TARF/
+├── configs/          # experiment configurations
+├── docs/             # additional documentation
+├── scripts/          # training, evaluation, and verification scripts
+├── src/wztarf/       # main WZ-TARF implementation
+├── tests/            # unit tests
+├── README.md
+├── requirements.txt
+└── pyproject.toml
 ```
 
-The release intentionally excludes the thousands of experimental sweep/diagnostic scripts from the research workspace.
+The public repository contains the main implementation and reproduction code while leaving out old experimental sweeps, temporary outputs, and debugging logs.
 
-## Release checks
+## Main source modules
 
-Before committing:
-
-```bash
-python scripts/verify_release.py
+```text
+src/wztarf/
+├── data/             dataset loading and batching
+├── models/           WZ-TARF model architecture
+├── losses/           training objectives
+├── training/         training utilities
+├── evaluation/       trajectory metrics
+├── pipeline/         full training/refinement pipeline
+└── postprocess/      final trajectory calibration
 ```
 
-The check fails on machine-specific absolute Windows user-home paths or Python files above 2,000 lines, verifies the best-run artifact, compiles the source, and runs the test suite.
+## Reproducibility
 
-## Notes on checkpoints
+The repository separates:
 
-The included A20 policy is small enough to keep with the repository. Larger legacy checkpoints can be copied from the research workspace with:
+- **training from scratch**
+- **evaluation of frozen models**
+- **historical research artifacts**
 
-```bash
-python scripts/import_best_artifacts.py --legacy-root "/path/to/old/WZ-TARF-workspace"
+Fresh neural-network training can vary slightly because of GPU and optimization nondeterminism.
+
+The reported final locked result is:
+
+```text
+1.037688971 minADE6
+2.009524822 minFDE6
 ```
-
-The script records SHA256 hashes automatically. Imported large checkpoints remain ignored by Git unless you intentionally publish them or attach them to a release.
