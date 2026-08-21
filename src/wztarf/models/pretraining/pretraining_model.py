@@ -163,8 +163,10 @@ class WZTARFPretrainingModel(nn.Module):
             lane_mask=scene[
                 "lane_mask"
             ],
+            # Full V3 topology pretraining uses the same explicitly
+            # separated WZ+worker topology context as Phase B.
             wz_context=scene[
-                "wz_context"
+                "topology_context"
             ],
             edge_index=batch[
                 "lane_edge_index"
@@ -177,9 +179,51 @@ class WZTARFPretrainingModel(nn.Module):
             ],
         )
 
+        # ==============================================================
+        # V3 PHASE-A SHARED ROUTE MACHINERY
+        #
+        # Use the exact route-query and monotonic route-progress modules
+        # that are used during Phase-B forecasting.
+        # ==============================================================
+
+        route = self.backbone.route_queries(
+            ego_context=scene["ego_context"],
+            lane_context=scene["lane_context"],
+            horizon_context=scene["horizon_context"],
+            lane_states=scene["lane_states"],
+            lane_mask=scene["lane_mask"],
+            lane_centerline=scene["lane_centerline"],
+            lane_point_mask=scene["lane_point_mask"],
+            node_viability=scene["node_viability"],
+            edge_viability=scene["edge_viability"],
+            lane_edge_index=batch["lane_edge_index"],
+            lane_edge_mask=batch["lane_edge_mask"],
+        )
+
+        progress = self.backbone.route_progress(
+            mode_context=route["mode_context"],
+            route_node_occupancy=route["route_node_occupancy"],
+            route_edge_occupancy=route["route_edge_occupancy"],
+            edge_viability=scene["edge_viability"],
+            lane_edge_index=batch["lane_edge_index"],
+            lane_edge_type=batch["lane_edge_type"],
+            lane_edge_mask=batch["lane_edge_mask"],
+            lane_centerline=scene["lane_centerline"],
+            lane_point_mask=scene["lane_point_mask"],
+            lane_mask=scene["lane_mask"],
+        )
+
         return {
             **reconstruction,
             **topology,
             "context_embeddings": context_embeddings,
             "future_embeddings": future_embeddings,
+
+            # Shared Phase-B V3 route machinery.
+            "route_node_occupancy": route["route_node_occupancy"],
+            "route_edge_occupancy": route["route_edge_occupancy"],
+            "route_viability": route["route_viability"],
+            "route_goal_prob": route["goal_prob"],
+            "route_progress": progress["route_progress"],
+            "route_anchors": progress["route_progress_anchors"],
         }
