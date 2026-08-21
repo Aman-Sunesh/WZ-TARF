@@ -37,7 +37,7 @@ def main() -> None:
     if errors:
         raise SystemExit("\n".join(errors))
 
-    subprocess.run(["python", "-m", "compileall", "-q", "src", "scripts", "tests"], check=True, cwd=ROOT)
+    subprocess.run(["python", "-m", "compileall", "-q", "src", "scripts", "tests", "repro_exact"], check=True, cwd=ROOT)
     subprocess.run(["python", "-m", "pytest", "-q"], check=True, cwd=ROOT)
     print("Release verification: PASS")
 
